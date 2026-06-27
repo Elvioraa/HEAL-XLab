@@ -130,3 +130,17 @@ Both return `pred_box_tensor`, `pred_score`, and `gt_box_tensor`. HBEC uses only
 - enabled refine only.
 - enabled refine + novel.
 - enabled refine + novel + suppress.
+
+## HEAL-XLab-v1.1-logfmt
+
+Change:
+- AP metric print precision changed from 2 decimals to 4 decimals.
+
+Reason:
+- Two-decimal AP output hides important differences, especially AP@0.7 changes around 0.01.
+- Future HEAL-XLab final_infer logs should preserve values like 0.8045 instead of 0.80.
+
+Scope:
+- Only AP print formatting was changed.
+- AP calculation logic was not changed.
+- Inference/model/HBEC logic was not changed.
