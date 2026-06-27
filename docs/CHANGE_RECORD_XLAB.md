@@ -173,6 +173,83 @@ Base hash: `27f0e4f`
 - `evidence_source=none` still falls back and returns official outputs unchanged.
 - If both official no-fusion and `single_agent_reinfer` fail, HBEC falls back and records a concrete `fallback_reason`.
 
+## HEAL-XLab-v2-HVP-CBEA-Trainable
+
+Base hash: `fb533c2`
+
+Method: Hypothesis Verification Protocol + Cooperative Bayesian Evidence Accumulation.
+
+### Difference From v1 HBEC
+
+- v1 HBEC is a final-infer/post-process hook under `opencood/xlab/hbec`.
+- v2 HVP-CBEA is a trainable model-forward-level direction inserted before the official detection heads.
+- v1 code is preserved and not modified by this change.
+
+### Added Files
+
+- `opencood/models/sub_modules/hypothesis_encoder.py`
+  - Generates sparse hypotheses from BEV feature maps.
+- `opencood/models/sub_modules/hypothesis_verifier.py`
+  - Produces CONFIRM / REFUTE / REFINE logits, refine deltas, and novel hypotheses from collaborator BEV features.
+- `opencood/models/sub_modules/bayesian_hypothesis_fusion.py`
+  - Performs Bayesian-style log-odds update and scatters hypothesis evidence back into BEV features.
+- `opencood/models/heter_pyramid_collab_hvp_cbea.py`
+  - New model core method using plan B. Official `heter_pyramid_collab.py` is not modified.
+  - Adds a lightweight collaborator BEV projection when per-agent BEV channels differ from the official head feature channels.
+- `opencood/tools/check_hvp_cbea_smoke.py`
+  - Lightweight tensor-only smoke test.
+- `docs/HVP_CBEA_CODE_PATH_AUDIT.md`
+- `docs/HVP_CBEA_CONFIG_SCHEMA.md`
+- `docs/HVP_CBEA_V2_PLAN.md`
+
+### Modified Files
+
+- `opencood/models/__init__.py`
+  - Adds a small `build_model()` compatibility wrapper for import checks.
+- `opencood/loss/point_pillar_loss.py`
+  - Adds `output_dict['hvp_cbea_loss']` only when present.
+- `opencood/loss/point_pillar_depth_loss.py`
+  - Logs `hvp_cbea_loss` only when the base loss recorded it.
+- `docs/CHANGE_RECORD_XLAB.md`
+  - Records this change.
+
+### Enable Path
+
+Real yaml path:
+
+```yaml
+model:
+  core_method: heter_pyramid_collab_hvp_cbea
+  args:
+    hvp_cbea:
+      enabled: true
+      fallback_on_error: true
+```
+
+Default is `enabled=false`.
+
+### Fallback Mechanism
+
+- If `model.core_method` remains `heter_pyramid_collab`, official HEAL is unchanged.
+- If `model.core_method=heter_pyramid_collab_hvp_cbea` but `model.args.hvp_cbea.enabled=false`, the v2 branch bypasses HVP-CBEA logic and follows the official forward structure.
+- If HVP-CBEA is enabled but no hypotheses, no compatible collaborator BEV feature, shape mismatch, or an exception occurs with `fallback_on_error=true`, the original `fused_feature` is returned to the official heads.
+
+### Loss Integration
+
+- Training loss integration is implemented as optional.
+- The model may attach `output_dict['hvp_cbea_loss']`.
+- `PointPillarLoss` adds it to total loss only when present.
+- If the field is absent, official loss is unchanged.
+- Current auxiliary module `compute_loss()` methods are defensive and return zero when GT format is unavailable.
+- Further stage2 training may be needed to make the auxiliary losses non-zero and task-specific.
+
+### Safety
+
+- Ground truth is not used in inference or feature fusion.
+- Raw camera features are not bypassed; modules operate on official BEV tensors after official encoders/backbones/aligners.
+- No logs config is added.
+- Official `heter_pyramid_collab.py` is not modified.
+
 ## HEAL-XLab-v1.1-logfmt
 
 Change:

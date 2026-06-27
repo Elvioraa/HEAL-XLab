@@ -79,12 +79,13 @@ class PointPillarDepthLoss(PointPillarLoss):
         dir_loss = self.loss_dict.get('dir_loss', 0)
         iou_loss = self.loss_dict.get('iou_loss', 0)
         depth_loss = self.loss_dict.get('depth_loss', 0)
+        hvp_cbea_loss = self.loss_dict.get('hvp_cbea_loss', 0)
 
 
         print("[epoch %d][%d/%d]%s || Loss: %.4f || Conf Loss: %.4f"
-              " || Loc Loss: %.4f || Dir Loss: %.4f || IoU Loss: %.4f || Depth Loss: %.4f" % (
+              " || Loc Loss: %.4f || Dir Loss: %.4f || IoU Loss: %.4f || Depth Loss: %.4f || HVP-CBEA Loss: %.4f" % (
                   epoch, batch_id + 1, batch_len, suffix,
-                  total_loss, cls_loss, reg_loss, dir_loss, iou_loss, depth_loss))
+                  total_loss, cls_loss, reg_loss, dir_loss, iou_loss, depth_loss, hvp_cbea_loss))
 
         if not writer is None:
             writer.add_scalar('Regression_loss' + suffix, reg_loss,
@@ -96,6 +97,8 @@ class PointPillarDepthLoss(PointPillarLoss):
             writer.add_scalar('Iou_loss' + suffix, iou_loss,
                             epoch*batch_len + batch_id)
             writer.add_scalar('Depth_loss' + suffix, depth_loss,
+                            epoch*batch_len + batch_id)
+            writer.add_scalar('HVP_CBEA_loss' + suffix, hvp_cbea_loss,
                             epoch*batch_len + batch_id)
 
 

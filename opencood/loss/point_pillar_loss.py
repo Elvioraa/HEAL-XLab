@@ -114,6 +114,11 @@ class PointPillarLoss(nn.Module):
             self.loss_dict.update({'iou_loss': iou_loss.item()})
 
         total_loss += reg_loss + cls_loss
+        if suffix == "" and "hvp_cbea_loss" in output_dict:
+            hvp_cbea_loss = output_dict["hvp_cbea_loss"]
+            if torch.is_tensor(hvp_cbea_loss):
+                total_loss += hvp_cbea_loss
+                self.loss_dict.update({'hvp_cbea_loss': hvp_cbea_loss.item()})
 
         self.loss_dict.update({'total_loss': total_loss.item(),
                                'reg_loss': reg_loss.item(),
