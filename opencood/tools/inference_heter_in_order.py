@@ -29,6 +29,7 @@ from opencood.data_utils.datasets import build_dataset
 from opencood.utils import eval_utils
 from opencood.visualization import vis_utils, my_vis, simple_vis
 from opencood.utils.common_utils import update_dict
+from opencood.xlab.hooks import apply_xlab_postprocess_hook
 torch.multiprocessing.set_sharing_strategy('file_system')
 
 
@@ -244,6 +245,27 @@ def main():
                 pred_box_tensor = infer_result['pred_box_tensor']
                 gt_box_tensor = infer_result['gt_box_tensor']
                 pred_score = infer_result['pred_score']
+
+                pred_box_tensor, pred_score, gt_box_tensor = apply_xlab_postprocess_hook(
+                    pred_box_tensor=pred_box_tensor,
+                    pred_score=pred_score,
+                    gt_box_tensor=gt_box_tensor,
+                    batch_data=batch_data,
+                    model=model,
+                    hypes=hypes,
+                    infer_context={
+                        "frame_id": i,
+                        "infer_info": infer_info,
+                        "fusion_method": opt.fusion_method,
+                        "use_cav": use_cav,
+                        "model_dir": opt.model_dir,
+                    },
+                )
+                infer_result.update({
+                    "pred_box_tensor": pred_box_tensor,
+                    "pred_score": pred_score,
+                    "gt_box_tensor": gt_box_tensor,
+                })
                 
                 eval_utils.caluclate_tp_fp(pred_box_tensor,
                                         pred_score,
