@@ -83,3 +83,50 @@ Then open one experimental mechanism at a time under `match`, `refine`, `novel`,
 - The first version may need a follow-up evidence extraction path before AP can change.
 - AP improvement must be validated by final_infer experiments.
 
+## HEAL-XLab-v1.1-HBEC Evidence Extraction
+
+Base hash: `52eb4ce`
+
+### Modified Files
+
+- `opencood/xlab/config.py`
+  - Changed default `hbec.evidence_source` to `none`.
+- `opencood/xlab/hbec/engine.py`
+  - Integrated `HBECEvidenceExtractor`.
+  - Added evidence debug metrics.
+  - Falls back safely when extraction fails.
+- `opencood/xlab/metrics.py`
+  - Added evidence-source and extraction-status fields.
+- `opencood/tools/inference_heter_in_order.py`
+  - Added `dataset` to `infer_context` so official re-inference can call the active dataset post-processor.
+
+### Added Files
+
+- `opencood/xlab/hbec/evidence.py`
+  - Implements object-level evidence extraction from explicit context or official re-inference functions.
+
+### Official Evidence Functions
+
+- `opencood.tools.inference_utils.inference_late_fusion`
+- `opencood.tools.inference_utils.inference_no_fusion`
+
+Both return `pred_box_tensor`, `pred_score`, and `gt_box_tensor`. HBEC uses only `pred_box_tensor` and `pred_score` for evidence.
+
+### Safety and Fallback
+
+- Default `evidence_source=none`; enabled HBEC still falls back unless evidence is explicitly selected.
+- `late_fusion_reinfer` and `no_fusion_reinfer` are object-level evidence sources after official post-process, not raw camera feature bypass.
+- Extraction runs under `torch.no_grad()`.
+- The extractor preserves the model training/eval state.
+- `gt_box_tensor` is ignored for fusion.
+- `batch_data` and `hypes` are not intentionally modified by XLab.
+- If extraction fails or returns empty evidence, HBEC returns official outputs unchanged and records `fallback_reason`.
+- `enabled=false` still returns official outputs from the hook before any extraction is attempted.
+
+### Follow-up Experiment Order
+
+- disabled equivalence check.
+- enabled + `evidence_source=late_fusion_reinfer`.
+- enabled refine only.
+- enabled refine + novel.
+- enabled refine + novel + suppress.

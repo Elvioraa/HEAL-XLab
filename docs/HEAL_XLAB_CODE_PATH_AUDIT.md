@@ -61,3 +61,24 @@ Base hash: `96812ed`
 - If no reliable collaborator evidence is provided in `infer_context`, `HBECPostProcessor` returns official `pred_box_tensor`, `pred_score`, and `gt_box_tensor` unchanged with `fallback_reason = no_collaborator_evidence`.
 - The hook is inserted after official post-process and before AP accumulation in `opencood/tools/inference_heter_in_order.py`.
 
+## HEAL-XLab-v1.1 Evidence Extraction Audit
+
+Audit base before v1.1 implementation: `52eb4ce`
+
+- `opencood/tools/inference_heter.py` is not present in this repository.
+- Official late fusion inference exists at `opencood/tools/inference_utils.py:18`, `inference_late_fusion(batch_data, model, dataset)`.
+- Official no fusion inference exists at `opencood/tools/inference_utils.py:51`, `inference_no_fusion(batch_data, model, dataset, single_gt=False)`.
+- Both official functions return a dict containing:
+  - `pred_box_tensor`
+  - `pred_score`
+  - `gt_box_tensor`
+- `inference_late_fusion()` calls `dataset.post_process(batch_data, output_dict)`, which uses the dataset post-processor and official NMS/range filtering.
+- `inference_no_fusion()` calls `dataset.post_process_no_fusion(...)`; this method exists on `late_fusion_dataset.py` and `late_heter_fusion_dataset.py`, but not on the audited intermediate heter final-infer dataset. v1.1 therefore checks `hasattr(dataset, "post_process_no_fusion")` before using `no_fusion_reinfer`.
+- Official post-process projects predictions into ego space before returning. `voxel_postprocessor.py` applies each CAV `transformation_matrix` and returns post-NMS boxes in the ego frame.
+- Calling these functions inside `inference_heter_in_order.py` requires the current `opencood_dataset` object, so the hook context now includes `dataset`.
+- XLab is not inserted into `opencood/tools/inference_utils.py`, so official re-inference does not recursively trigger the XLab hook.
+- The extractor preserves the model training/eval state around re-inference and uses `torch.no_grad()`.
+- Re-inference outputs are used only as object-level evidence. Returned `gt_box_tensor` is ignored for fusion.
+- If `evidence_source=none`, extraction is skipped and HBEC falls back.
+- If `evidence_source=late_fusion_reinfer`, v1.1 calls official `inference_utils.inference_late_fusion()` and converts its `pred_box_tensor` / `pred_score` into an `EvidencePacket`.
+- If `evidence_source=no_fusion_reinfer`, v1.1 calls official `inference_utils.inference_no_fusion()` only when the active dataset exposes `post_process_no_fusion`; otherwise it falls back.

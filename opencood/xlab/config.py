@@ -11,7 +11,7 @@ _DEFAULT_XLAB_CFG = {
     "hbec": {
         "enabled": False,
         "apply_stage": "final_infer_postprocess",
-        "evidence_source": "official_or_fallback",
+        "evidence_source": "none",
         "target_modalities": ["m2", "m4", "camera"],
         "base_uncertainty": 1.0,
         "min_score_for_uncertainty": 0.05,
@@ -79,4 +79,3 @@ def hbec_is_enabled(xlab_cfg):
         and xlab_cfg.get("method", "hbec") == "hbec"
         and xlab_cfg.get("hbec", {}).get("enabled", False)
     )
-

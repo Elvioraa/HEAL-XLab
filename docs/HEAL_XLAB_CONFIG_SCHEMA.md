@@ -11,7 +11,7 @@ xlab:
   hbec:
     enabled: false
     apply_stage: final_infer_postprocess
-    evidence_source: official_or_fallback
+    evidence_source: none
     target_modalities: ["m2", "m4", "camera"]
     base_uncertainty: 1.0
     min_score_for_uncertainty: 0.05
@@ -42,3 +42,25 @@ xlab:
 
 Both `xlab.enabled` and `xlab.hbec.enabled` default to `false`. HBEC changes inference output only when both switches are explicitly true and reliable collaborator evidence is available.
 
+## HEAL-XLab-v1.1 Evidence Sources
+
+Default remains `none`, so enabling HBEC without explicitly selecting an evidence source still falls back without changing official outputs.
+
+```yaml
+xlab:
+  enabled: false
+  method: hbec
+  debug: true
+  hbec:
+    enabled: false
+    evidence_source: none
+    # Optional:
+    # evidence_source: late_fusion_reinfer
+    # evidence_source: no_fusion_reinfer
+    # evidence_source: explicit
+```
+
+- `none`: do not extract evidence; safe fallback.
+- `late_fusion_reinfer`: call official `opencood.tools.inference_utils.inference_late_fusion()` and use returned object predictions as evidence.
+- `no_fusion_reinfer`: call official `opencood.tools.inference_utils.inference_no_fusion()` only when the active dataset supports `post_process_no_fusion`.
+- `explicit`: use `infer_context["collaborator_evidence"]` or `infer_context["evidence_packet"]`.

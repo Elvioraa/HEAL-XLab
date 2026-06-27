@@ -23,6 +23,11 @@ class XLabMetricsRecorder:
             "payload_bytes_est": 0,
             "fallback_reason": "",
             "nms_status": "not_applied",
+            "evidence_source": "none",
+            "evidence_box_count": 0,
+            "evidence_score_mean": 0.0,
+            "evidence_extract_success": False,
+            "evidence_extract_error": "",
         }
 
     def write(self, record):
@@ -44,4 +49,3 @@ class XLabMetricsRecorder:
         path = os.path.join(debug_dir, "hbec_debug.jsonl")
         with open(path, "a", encoding="utf-8") as fp:
             fp.write(json.dumps(merged, sort_keys=True) + "\n")
-

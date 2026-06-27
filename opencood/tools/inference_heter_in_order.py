@@ -259,6 +259,7 @@ def main():
                         "fusion_method": opt.fusion_method,
                         "use_cav": use_cav,
                         "model_dir": opt.model_dir,
+                        "dataset": opencood_dataset,
                     },
                 )
                 infer_result.update({

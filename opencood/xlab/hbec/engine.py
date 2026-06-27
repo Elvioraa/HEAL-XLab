@@ -3,6 +3,7 @@
 import torch
 
 from opencood.xlab.hbec.matcher import HypothesisMatcher
+from opencood.xlab.hbec.evidence import HBECEvidenceExtractor
 from opencood.xlab.hbec.packet import EvidencePacket, HypothesisPacket
 from opencood.xlab.hbec.refiner import BayesianRefiner
 from opencood.xlab.utils import is_valid_box_tensor, is_valid_score_tensor, tensor_payload_bytes
@@ -30,6 +31,11 @@ class HBECPostProcessor:
             "hbec_enabled": True,
             "payload_bytes_est": tensor_payload_bytes(pred_box_tensor, pred_score),
             "nms_status": "not_applied",
+            "evidence_source": self.hbec_cfg.get("evidence_source", "none"),
+            "evidence_box_count": 0,
+            "evidence_score_mean": 0.0,
+            "evidence_extract_success": False,
+            "evidence_extract_error": "",
         }
 
         if not is_valid_box_tensor(pred_box_tensor) or not is_valid_score_tensor(pred_score):
@@ -48,9 +54,15 @@ class HBECPostProcessor:
             source_agent="ego",
             source_modality=(hypes or {}).get("ego_modality"),
         )
-        evidence_packet = self._get_collaborator_evidence(infer_context)
+        evidence_packet = self._get_collaborator_evidence(
+            batch_data=batch_data,
+            model=model,
+            hypes=hypes,
+            infer_context=infer_context,
+            record=record,
+        )
         if evidence_packet is None:
-            record["fallback_reason"] = "no_collaborator_evidence"
+            record["fallback_reason"] = record.get("fallback_reason") or "no_collaborator_evidence"
             self._write(record)
             return pred_box_tensor, pred_score, gt_box_tensor
 
@@ -82,27 +94,24 @@ class HBECPostProcessor:
         self._write(record)
         return fused_boxes, fused_scores, gt_box_tensor
 
-    def _get_collaborator_evidence(self, infer_context):
-        infer_context = infer_context or {}
-        evidence = infer_context.get("collaborator_evidence") or infer_context.get("evidence_packet")
-        if evidence is None:
-            return None
-        if isinstance(evidence, EvidencePacket):
-            return evidence
-        boxes = evidence.get("boxes") if isinstance(evidence, dict) else None
-        scores = evidence.get("scores") if isinstance(evidence, dict) else None
-        if not is_valid_box_tensor(boxes) or not is_valid_score_tensor(scores) or boxes.shape[0] != scores.shape[0]:
-            return None
-        return EvidencePacket.from_tensors(
-            boxes,
-            scores,
-            self.xlab_cfg,
-            labels=evidence.get("labels"),
-            source_agent=evidence.get("source_agent"),
-            source_modality=evidence.get("source_modality"),
-            timestamp=evidence.get("timestamp"),
-            transform_status=evidence.get("transform_status", "ego_frame"),
+    def _get_collaborator_evidence(self, batch_data, model, hypes, infer_context, record):
+        infer_context = dict(infer_context or {})
+        extractor = HBECEvidenceExtractor(self.xlab_cfg)
+        evidence_packet = extractor.extract(
+            batch_data=batch_data,
+            model=model,
+            hypes=hypes,
+            infer_context=infer_context,
         )
+        record["evidence_extract_error"] = extractor.last_error
+        if evidence_packet is None:
+            record["fallback_reason"] = extractor.last_reason or "no_collaborator_evidence"
+            return None
+        record["evidence_extract_success"] = True
+        record["evidence_box_count"] = int(evidence_packet.boxes.shape[0])
+        record["evidence_score_mean"] = float(evidence_packet.scores.detach().mean().cpu())
+        record["evidence_source"] = evidence_packet.source_agent or self.hbec_cfg.get("evidence_source", "none")
+        return evidence_packet
 
     def _apply_optional_nms(self, boxes, scores):
         try:
