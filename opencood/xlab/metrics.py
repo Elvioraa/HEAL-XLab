@@ -24,10 +24,17 @@ class XLabMetricsRecorder:
             "fallback_reason": "",
             "nms_status": "not_applied",
             "evidence_source": "none",
+            "evidence_source_requested": "none",
+            "evidence_source_used": "",
+            "evidence_extract_func": "",
             "evidence_box_count": 0,
             "evidence_score_mean": 0.0,
             "evidence_extract_success": False,
             "evidence_extract_error": "",
+            "raw_output_keys": [],
+            "dataset_class": "",
+            "has_post_process_no_fusion": False,
+            "has_post_processor": False,
         }
 
     def write(self, record):

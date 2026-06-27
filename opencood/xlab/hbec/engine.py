@@ -32,10 +32,17 @@ class HBECPostProcessor:
             "payload_bytes_est": tensor_payload_bytes(pred_box_tensor, pred_score),
             "nms_status": "not_applied",
             "evidence_source": self.hbec_cfg.get("evidence_source", "none"),
+            "evidence_source_requested": self.hbec_cfg.get("evidence_source", "none"),
+            "evidence_source_used": "",
+            "evidence_extract_func": "",
             "evidence_box_count": 0,
             "evidence_score_mean": 0.0,
             "evidence_extract_success": False,
             "evidence_extract_error": "",
+            "raw_output_keys": [],
+            "dataset_class": "",
+            "has_post_process_no_fusion": False,
+            "has_post_processor": False,
         }
 
         if not is_valid_box_tensor(pred_box_tensor) or not is_valid_score_tensor(pred_score):
@@ -104,6 +111,7 @@ class HBECPostProcessor:
             infer_context=infer_context,
         )
         record["evidence_extract_error"] = extractor.last_error
+        record.update(extractor.debug_info)
         if evidence_packet is None:
             record["fallback_reason"] = extractor.last_reason or "no_collaborator_evidence"
             return None
@@ -111,6 +119,7 @@ class HBECPostProcessor:
         record["evidence_box_count"] = int(evidence_packet.boxes.shape[0])
         record["evidence_score_mean"] = float(evidence_packet.scores.detach().mean().cpu())
         record["evidence_source"] = evidence_packet.source_agent or self.hbec_cfg.get("evidence_source", "none")
+        record["evidence_source_used"] = record["evidence_source"]
         return evidence_packet
 
     def _apply_optional_nms(self, boxes, scores):

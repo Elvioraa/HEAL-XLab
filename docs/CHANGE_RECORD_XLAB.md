@@ -131,6 +131,48 @@ Both return `pred_box_tensor`, `pred_score`, and `gt_box_tensor`. HBEC uses only
 - enabled refine + novel.
 - enabled refine + novel + suppress.
 
+## HEAL-XLab-v1.2 no-fusion evidence extraction fix
+
+Base hash: `27f0e4f`
+
+### Server Finding
+
+- Experiment: `HEAL-XLab-v1.1 step02_hbec_no_refine_only`.
+- Requested config used `xlab.enabled=true`, `hbec.enabled=true`, `evidence_source=no_fusion_reinfer`, `refine=true`, `novel=false`, `suppress=false`.
+- Result for use_cav2 was `0.8370 / 0.8181 / 0.7247`.
+- Debug showed all 2170 frames fell back:
+  - `total_evidence_boxes = 0`
+  - `total_matched_boxes = 0`
+  - `total_refined_boxes = 0`
+  - `fallback_reason = dataset_missing_post_process_no_fusion`
+
+### Root Cause
+
+- Official `opencood.tools.inference_utils.inference_no_fusion()` exists, but it calls `dataset.post_process_no_fusion(...)`.
+- The active HEAL final-infer dataset is `Intermediate_heter_Infer_Fusion_Dataset`, which inherits `post_process()` from `intermediate_heter_fusion_dataset.py` but does not implement `post_process_no_fusion()`.
+- Therefore v1.1 correctly refused to fabricate evidence, but `no_fusion_reinfer` had no usable evidence path.
+
+### Fix
+
+- `opencood/xlab/hbec/evidence.py`
+  - Keeps the official `inference_no_fusion()` path when the dataset supports `post_process_no_fusion`.
+  - When `evidence_source=no_fusion_reinfer` and the active dataset lacks `post_process_no_fusion`, falls back to a new object-level `single_agent_reinfer` extractor.
+  - `single_agent_reinfer` builds an ego-only view of the current batch without mutating `batch_data`, runs the model under `torch.no_grad()`, and uses official `dataset.post_process()` to produce `pred_box_tensor` and `pred_score`.
+  - Adds explicit debug fields for requested source, used source, extraction function, dataset class, raw output keys, and dataset capability flags.
+- `opencood/xlab/hbec/engine.py`
+  - Records the enhanced evidence debug fields in `hbec_debug.jsonl`.
+- `opencood/xlab/metrics.py`
+  - Adds defaults for the new evidence debug fields.
+
+### Safety
+
+- `gt_box_tensor` is still ignored for HBEC fusion.
+- No raw camera feature bypass is introduced; `single_agent_reinfer` uses model object-level predictions and official post-process.
+- Training code and training flow are unchanged.
+- `enabled=false` returns official outputs before extraction is attempted.
+- `evidence_source=none` still falls back and returns official outputs unchanged.
+- If both official no-fusion and `single_agent_reinfer` fail, HBEC falls back and records a concrete `fallback_reason`.
+
 ## HEAL-XLab-v1.1-logfmt
 
 Change:
