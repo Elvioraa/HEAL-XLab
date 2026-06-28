@@ -303,6 +303,47 @@ All inherited official HEAL parameters are frozen.
 - v1 HBEC is not modified.
 - No logs config is added.
 
+## HEAL-XLab-v2.2 supervise_single compatibility fix
+
+Base hash: `e3ac402`
+
+### Server Finding
+
+- Fine-tune smoke with full collaborative `train_only_hvp` reached the first batch and reported:
+  - `Loss: 21.1791`
+  - `HVP-CBEA Loss: 0.0000`
+- Training then entered `train.py` single-supervision branch:
+  - `criterion(ouput_dict, batch_data['ego']['label_dict_single'], suffix="_single")`
+- The loss expected `output_dict['cls_preds_single']` and failed with:
+  - `KeyError: 'cls_preds_single'`
+
+### Root Cause
+
+- `HeterPyramidCollabHvpCbea.forward()` did not emit the train-required single prediction fields when `model.args.supervise_single=true`.
+- The wrapper preserved collaborative outputs and `occ_single_list`, but missed:
+  - `cls_preds_single`
+  - `reg_preds_single`
+  - `dir_preds_single`
+
+### Fix
+
+- `opencood/models/heter_pyramid_collab_hvp_cbea.py`
+  - Reads `self.supervise_single = bool(args.get("supervise_single", False))`.
+  - When true, computes single predictions through the official per-agent route:
+    - `pyramid_backbone.forward_single(heter_feature_2d)`
+    - optional `shrink_conv`
+    - shared `cls_head`, `reg_head`, `dir_head`
+  - Adds `cls_preds_single`, `reg_preds_single`, and `dir_preds_single` to `output_dict`.
+  - HVP-CBEA feature injection remains limited to final collaborative `fused_feature`.
+
+### Safety
+
+- Official `heter_pyramid_collab.py` is not modified.
+- `supervise_single` is not disabled or bypassed.
+- v1 HBEC is not modified.
+- `train_only_hvp` freeze prefixes and behavior are unchanged.
+- No logs config is added.
+
 ## HEAL-XLab-v1.1-logfmt
 
 Change:

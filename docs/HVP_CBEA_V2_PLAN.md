@@ -39,3 +39,13 @@ HVP-CBEA is a model-forward-level experimental direction. It is independent of v
 `model.args.hvp_cbea.train_only_hvp: true` freezes all inherited HEAL parameters and keeps only HVP-CBEA modules trainable. This protects the HEAL_m1_based baseline during fine-tuning.
 
 This method is collaborative and depends on the `heter_pyramid_collab_hvp_cbea` forward variables (`heter_feature_2d`, `record_len`, collaborator BEV features). It is not compatible with the official `heter_pyramid_single` stage2/m2 training path.
+
+## v2.2 Single-supervision Compatibility
+
+When `model.args.supervise_single: true`, the wrapper preserves train-required single prediction outputs:
+
+- `cls_preds_single`
+- `reg_preds_single`
+- `dir_preds_single`
+
+These are produced from the official per-agent BEV route: `pyramid_backbone.forward_single(heter_feature_2d)`, optional `shrink_conv`, then the shared detection heads. HVP-CBEA still only injects into the collaborative `fused_feature`.

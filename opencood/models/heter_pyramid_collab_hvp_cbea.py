@@ -94,6 +94,7 @@ class HeterPyramidCollabHvpCbea(HeterPyramidCollab):
 
     def __init__(self, args):
         super().__init__(args)
+        self.supervise_single = bool(args.get("supervise_single", False))
         hvp = args.get("hvp_cbea", {}) or {}
         self.hvp_cbea_cfg = self._default_hvp_cfg(args)
         self.hvp_cbea_cfg.update(hvp)
@@ -179,6 +180,18 @@ class HeterPyramidCollabHvpCbea(HeterPyramidCollab):
         heter_feature_2d = torch.stack(heter_feature_2d_list)
         if self.compress:
             heter_feature_2d = self.compressor(heter_feature_2d)
+
+        if self.supervise_single:
+            # Preserve the official single-supervision prediction path:
+            # per-agent BEV -> pyramid forward_single -> optional shrink -> shared heads.
+            single_feature, _ = self.pyramid_backbone.forward_single(heter_feature_2d)
+            if self.shrink_flag:
+                single_feature = self.shrink_conv(single_feature)
+            output_dict.update({
+                "cls_preds_single": self.cls_head(single_feature),
+                "reg_preds_single": self.reg_head(single_feature),
+                "dir_preds_single": self.dir_head(single_feature),
+            })
 
         fused_feature, occ_outputs = self.pyramid_backbone.forward_collab(
             heter_feature_2d,
