@@ -63,3 +63,9 @@ When `train_only_hvp: true`, official HEAL backbone parameters are frozen and on
 - `bayesian_hypothesis_fusion`
 
 This is intended for full collaborative fine-tuning from a HEAL_m1_based final_infer checkpoint. It is not intended for the official `heter_pyramid_single` stage2/m2 yaml path.
+
+## v2.4 Frozen HEAL BN Buffer Rule
+
+When `enabled: true` and `train_only_hvp: true`, inherited HEAL BatchNorm and SyncBatchNorm modules are kept in eval mode during training. This freezes their `running_mean`, `running_var`, and `num_batches_tracked` buffers in addition to freezing inherited HEAL parameters with `requires_grad=False`.
+
+HVP-CBEA module BatchNorm layers remain in train mode and can update normally. With `enabled: false`, the wrapper still follows the official HEAL behavior and skips HVP-CBEA logic.

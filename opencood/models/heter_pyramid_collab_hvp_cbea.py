@@ -92,6 +92,14 @@ from opencood.utils.transformation_utils import normalize_pairwise_tfm
 class HeterPyramidCollabHvpCbea(HeterPyramidCollab):
     """HeterPyramidCollab with optional HVP-CBEA before detection heads."""
 
+    HVP_MODULE_PREFIXES = (
+        "hvp_collaborator_proj",
+        "hypothesis_encoder",
+        "hypothesis_verifier",
+        "bayesian_hypothesis_fusion",
+    )
+    BN_TYPES = (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d, nn.SyncBatchNorm)
+
     def __init__(self, args):
         super().__init__(args)
         self.supervise_single = bool(args.get("supervise_single", False))
@@ -135,9 +143,17 @@ class HeterPyramidCollabHvpCbea(HeterPyramidCollab):
             )
             if self.hvp_train_only:
                 self._freeze_non_hvp_parameters()
+                self._set_frozen_heal_modules_eval()
             self.hvp_trainable_summary = self._summarize_trainable_parameters()
             if self.hvp_cbea_cfg.get("debug", False):
                 print("HVP-CBEA trainable summary:", self.hvp_trainable_summary)
+
+    def train(self, mode=True):
+        super().train(mode)
+        if mode and self.hvp_cbea_enabled and self.hvp_train_only:
+            self._set_frozen_heal_modules_eval()
+            self.hvp_trainable_summary = self._summarize_trainable_parameters()
+        return self
 
     def forward(self, data_dict):
         output_dict = {'pyramid': 'collab'}
@@ -225,10 +241,13 @@ class HeterPyramidCollabHvpCbea(HeterPyramidCollab):
         return output_dict
 
     def _apply_hvp_cbea(self, fused_feature, heter_feature_2d, record_len):
+        bn_mode_summary = self._summarize_bn_modes()
         debug = {
             "hvp_cbea_enabled": bool(self.hvp_cbea_enabled),
             "train_only_hvp": bool(self.hvp_train_only),
             "hvp_trainable_summary": self.hvp_trainable_summary,
+            "frozen_bn_eval_count": bn_mode_summary["frozen_bn_eval_count"],
+            "hvp_bn_train_count": bn_mode_summary["hvp_bn_train_count"],
             "ego_hyp_count": 0,
             "collaborator_count": 0,
             "verifier_used": False,
@@ -323,20 +342,22 @@ class HeterPyramidCollabHvpCbea(HeterPyramidCollab):
         }
 
     def _freeze_non_hvp_parameters(self):
-        hvp_prefixes = (
-            "hvp_collaborator_proj",
-            "hypothesis_encoder",
-            "hypothesis_verifier",
-            "bayesian_hypothesis_fusion",
-        )
         for name, param in self.named_parameters():
-            param.requires_grad_(any(name.startswith(prefix) for prefix in hvp_prefixes))
+            param.requires_grad_(self._is_hvp_module_name(name))
+
+    def _set_frozen_heal_modules_eval(self):
+        for module_name, module in self.named_modules():
+            if self._is_hvp_module_name(module_name):
+                continue
+            if isinstance(module, self.BN_TYPES):
+                module.eval()
 
     def _summarize_trainable_parameters(self):
         summary = {
             "trainable_total": 0,
             "frozen_total": 0,
             "trainable_prefix_count": {},
+            "train_only_hvp": bool(self.hvp_train_only),
         }
         for name, param in self.named_parameters():
             count = int(param.numel())
@@ -348,7 +369,26 @@ class HeterPyramidCollabHvpCbea(HeterPyramidCollab):
                 )
             else:
                 summary["frozen_total"] += count
+        summary.update(self._summarize_bn_modes())
         return summary
+
+    def _summarize_bn_modes(self):
+        summary = {
+            "frozen_bn_eval_count": 0,
+            "hvp_bn_train_count": 0,
+        }
+        for module_name, module in self.named_modules():
+            if not isinstance(module, self.BN_TYPES):
+                continue
+            if self._is_hvp_module_name(module_name):
+                if module.training:
+                    summary["hvp_bn_train_count"] += 1
+            elif not module.training:
+                summary["frozen_bn_eval_count"] += 1
+        return summary
+
+    def _is_hvp_module_name(self, module_name):
+        return any(module_name.startswith(prefix) for prefix in self.HVP_MODULE_PREFIXES)
 
     @staticmethod
     def _infer_collaborator_channels(args, fallback):

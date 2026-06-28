@@ -24,6 +24,7 @@ HVP-CBEA is a model-forward-level experimental direction. It is independent of v
 - Forward modules are implemented.
 - Loss integration is safe and optional through `output_dict['hvp_cbea_loss']`.
 - v2.1 adds `train_only_hvp`, allowing full collaborative fine-tuning while freezing official HEAL parameters.
+- v2.4 keeps inherited HEAL BatchNorm buffers frozen in `train_only_hvp` mode while leaving HVP-CBEA modules trainable.
 - GT-dependent auxiliary losses are defensive and return zero when GT format is not available.
 - No inference-time GT is used.
 - No raw camera feature bypass is introduced.
@@ -60,3 +61,14 @@ The v2.2 fine-tune smoke reached `final_loss.backward()` and exposed an inplace 
 - HVP-CBEA outputs are not detached, so detection loss remains able to train HVP-CBEA parameters.
 
 The smoke test now includes `loss.backward()` and verifies that HVP-CBEA parameters receive gradients. `enabled=false` behavior and the `train_only_hvp` freeze rule are unchanged.
+
+## v2.4 Frozen HEAL BN Buffer Fix
+
+The v2.3 `train_only_hvp` mode froze inherited HEAL parameters, but the inherited HEAL backbone stayed in train mode. BatchNorm buffers such as `running_mean`, `running_var`, and `num_batches_tracked` could therefore change during HVP-only fine-tuning.
+
+v2.4 tightens the freeze rule:
+
+- In `enabled=true` and `train_only_hvp=true`, all non-HVP BatchNorm and SyncBatchNorm modules are kept in eval mode.
+- HVP-CBEA modules still return to train mode after `model.train()`, so their parameters and internal BatchNorm statistics can train normally.
+- `enabled=false` remains equivalent to the official HEAL forward path.
+- The debug summary reports `train_only_hvp`, `frozen_bn_eval_count`, and `hvp_bn_train_count`.

@@ -386,6 +386,43 @@ Base hash: `45630d4`
 - v1 HBEC is not modified.
 - No logs config is added.
 
+## HEAL-XLab-v2.4 frozen HEAL BN buffer fix
+
+Base hash: `e02731c`
+
+### Server Finding
+
+- A checkpoint diff on the HVP-CBEA v2.3 fine-tune smoke showed:
+  - `hvp changed keys: 0`
+  - `non-hvp changed keys: 510`
+  - `keys missing in epoch1: 36`
+  - `keys missing in epoch2: 0`
+- The changed non-HVP keys were inherited HEAL BatchNorm buffers, including `running_mean`, `running_var`, and `num_batches_tracked` under `backbone_m1`, `backbone_m2`, and `backbone_m3`.
+- The missing epoch1 HVP keys are expected because the starting checkpoint did not contain HVP-CBEA parameters.
+
+### Root Cause
+
+- v2.3 `train_only_hvp` froze parameters with `requires_grad=False`.
+- Frozen inherited HEAL modules still stayed in train mode, so BatchNorm running statistics continued to update.
+- This polluted the HEAL_m1_based backbone during HVP-only fine-tuning.
+
+### Fix
+
+- `opencood/models/heter_pyramid_collab_hvp_cbea.py`
+  - Adds `_set_frozen_heal_modules_eval()`.
+  - Overrides `train(self, mode=True)` so each training-mode switch keeps non-HVP BatchNorm and SyncBatchNorm modules in eval mode.
+  - Keeps HVP-CBEA modules in train mode after `super().train(True)`.
+  - Adds debug summary fields: `frozen_bn_eval_count`, `hvp_bn_train_count`, and `train_only_hvp`.
+
+### Safety
+
+- Official `heter_pyramid_collab.py` is not modified.
+- `enabled=false` behavior is unchanged.
+- `train_only_hvp=true` now freezes both inherited HEAL parameters and inherited HEAL BN buffers.
+- HVP-CBEA internal BatchNorm modules remain trainable and keep updating during training.
+- v1 HBEC is not modified.
+- No logs config is added.
+
 ## HEAL-XLab-v1.1-logfmt
 
 Change:
