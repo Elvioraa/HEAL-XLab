@@ -23,6 +23,7 @@ HVP-CBEA is a model-forward-level experimental direction. It is independent of v
 
 - Forward modules are implemented.
 - Loss integration is safe and optional through `output_dict['hvp_cbea_loss']`.
+- v2.1 adds `train_only_hvp`, allowing full collaborative fine-tuning while freezing official HEAL parameters.
 - GT-dependent auxiliary losses are defensive and return zero when GT format is not available.
 - No inference-time GT is used.
 - No raw camera feature bypass is introduced.
@@ -32,3 +33,9 @@ HVP-CBEA is a model-forward-level experimental direction. It is independent of v
 - No hypotheses: return the original BEV feature.
 - No collaborator features: verifier returns neutral logits/deltas; fusion can still fall back.
 - Shape mismatch or exception with `fallback_on_error=true`: return the official fused feature.
+
+## v2.1 Training Freeze
+
+`model.args.hvp_cbea.train_only_hvp: true` freezes all inherited HEAL parameters and keeps only HVP-CBEA modules trainable. This protects the HEAL_m1_based baseline during fine-tuning.
+
+This method is collaborative and depends on the `heter_pyramid_collab_hvp_cbea` forward variables (`heter_feature_2d`, `record_len`, collaborator BEV features). It is not compatible with the official `heter_pyramid_single` stage2/m2 training path.

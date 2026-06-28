@@ -250,6 +250,59 @@ Default is `enabled=false`.
 - No logs config is added.
 - Official `heter_pyramid_collab.py` is not modified.
 
+## HEAL-XLab-v2.1 train_only_hvp
+
+Base hash: `18923bb`
+
+### Motivation
+
+- Server inspection confirmed `HeterPyramidCollabHvpCbea` is collaborative and depends on `heter_feature_2d`, `record_len`, and collaborator BEV features.
+- It is not suitable for the official `heter_pyramid_single` stage2/m2 yaml path.
+- v2.1 adds a safe fine-tuning mode for full collaborative configs: freeze official HEAL and train only HVP-CBEA modules.
+
+### Modified Files
+
+- `opencood/models/heter_pyramid_collab_hvp_cbea.py`
+  - Adds `model.args.hvp_cbea.train_only_hvp`.
+  - Adds `_freeze_non_hvp_parameters()`.
+  - Adds `_summarize_trainable_parameters()`.
+  - Adds train-only summary fields to `hvp_cbea_debug`.
+- `docs/HVP_CBEA_CONFIG_SCHEMA.md`
+- `docs/HVP_CBEA_V2_PLAN.md`
+- `docs/CHANGE_RECORD_XLAB.md`
+
+### YAML
+
+```yaml
+model:
+  core_method: heter_pyramid_collab_hvp_cbea
+  args:
+    hvp_cbea:
+      enabled: true
+      train_only_hvp: true
+      fallback_on_error: true
+      debug: true
+```
+
+### Freeze Rule
+
+When both `enabled=true` and `train_only_hvp=true`, only parameters whose names start with the following prefixes keep `requires_grad=True`:
+
+- `hvp_collaborator_proj`
+- `hypothesis_encoder`
+- `hypothesis_verifier`
+- `bayesian_hypothesis_fusion`
+
+All inherited official HEAL parameters are frozen.
+
+### Safety
+
+- If `enabled=false`, HVP-CBEA logic is bypassed and no HVP fields are added to `output_dict`.
+- If `train_only_hvp=false`, current default training behavior is preserved.
+- Official `heter_pyramid_collab.py` is not modified.
+- v1 HBEC is not modified.
+- No logs config is added.
+
 ## HEAL-XLab-v1.1-logfmt
 
 Change:

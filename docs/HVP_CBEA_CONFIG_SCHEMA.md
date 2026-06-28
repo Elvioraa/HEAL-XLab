@@ -24,6 +24,7 @@ model:
       loss_weight_verifier: 0.3
       loss_weight_fusion: 0.2
       fallback_on_error: true
+      train_only_hvp: false
       debug: false
 ```
 
@@ -35,7 +36,30 @@ model:
   args:
     hvp_cbea:
       enabled: true
+      train_only_hvp: true
       fallback_on_error: true
 ```
 
 With `enabled: false`, the new model follows the official HEAL forward path and skips all HVP-CBEA modules.
+
+## v2.1 Train-only HVP Fine-tuning
+
+```yaml
+model:
+  core_method: heter_pyramid_collab_hvp_cbea
+  args:
+    hvp_cbea:
+      enabled: true
+      train_only_hvp: true
+      fallback_on_error: true
+      debug: true
+```
+
+When `train_only_hvp: true`, official HEAL backbone parameters are frozen and only these HVP-CBEA modules remain trainable:
+
+- `hvp_collaborator_proj`
+- `hypothesis_encoder`
+- `hypothesis_verifier`
+- `bayesian_hypothesis_fusion`
+
+This is intended for full collaborative fine-tuning from a HEAL_m1_based final_infer checkpoint. It is not intended for the official `heter_pyramid_single` stage2/m2 yaml path.

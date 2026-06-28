@@ -5,9 +5,82 @@ model.args.hvp_cbea.enabled is explicitly true.
 """
 
 from collections import Counter
+import sys
+import types
 
 import torch
 import torch.nn as nn
+
+if "icecream" not in sys.modules:
+    icecream_stub = types.ModuleType("icecream")
+    icecream_stub.ic = lambda *args, **kwargs: args[0] if len(args) == 1 else args
+    sys.modules["icecream"] = icecream_stub
+if "timm.models.layers" not in sys.modules:
+    timm_stub = types.ModuleType("timm")
+    timm_models_stub = types.ModuleType("timm.models")
+    timm_layers_stub = types.ModuleType("timm.models.layers")
+
+    class _DropPath(nn.Identity):
+        pass
+
+    timm_layers_stub.DropPath = _DropPath
+    timm_stub.models = timm_models_stub
+    timm_models_stub.layers = timm_layers_stub
+    sys.modules.setdefault("timm", timm_stub)
+    sys.modules.setdefault("timm.models", timm_models_stub)
+    sys.modules.setdefault("timm.models.layers", timm_layers_stub)
+if "einops" not in sys.modules:
+    einops_stub = types.ModuleType("einops")
+
+    def _rearrange(tensor, pattern, **kwargs):
+        if pattern == "b (l c) h w -> b l c h w" and "l" in kwargs:
+            bsz, lc, height, width = tensor.shape
+            length = int(kwargs["l"])
+            channels = lc // length
+            return tensor.view(bsz, length, channels, height, width)
+        raise ImportError("einops is required for rearrange pattern: %s" % pattern)
+
+    def _repeat(tensor, pattern, **kwargs):
+        if pattern == "b h w c l -> b (h new_h) (w new_w) c l":
+            new_h = int(kwargs["new_h"])
+            new_w = int(kwargs["new_w"])
+            return tensor.repeat_interleave(new_h, dim=1).repeat_interleave(new_w, dim=2)
+        raise ImportError("einops is required for repeat pattern: %s" % pattern)
+
+    einops_stub.rearrange = _rearrange
+    einops_stub.repeat = _repeat
+    sys.modules.setdefault("einops", einops_stub)
+if "shapely.geometry" not in sys.modules:
+    shapely_stub = types.ModuleType("shapely")
+    shapely_geometry_stub = types.ModuleType("shapely.geometry")
+
+    class _Polygon:
+        def __init__(self, *args, **kwargs):
+            self.area = 0.0
+
+        def intersection(self, other):
+            return self
+
+        def union(self, other):
+            return self
+
+    shapely_geometry_stub.Polygon = _Polygon
+    shapely_stub.geometry = shapely_geometry_stub
+    sys.modules.setdefault("shapely", shapely_stub)
+    sys.modules.setdefault("shapely.geometry", shapely_geometry_stub)
+if "pyquaternion" not in sys.modules:
+    pyquaternion_stub = types.ModuleType("pyquaternion")
+
+    class _Quaternion:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        @property
+        def transformation_matrix(self):
+            return torch.eye(4).numpy()
+
+    pyquaternion_stub.Quaternion = _Quaternion
+    sys.modules.setdefault("pyquaternion", pyquaternion_stub)
 
 from opencood.models.heter_pyramid_collab import HeterPyramidCollab
 from opencood.models.sub_modules.hypothesis_encoder import HypothesisEncoder
@@ -25,6 +98,8 @@ class HeterPyramidCollabHvpCbea(HeterPyramidCollab):
         self.hvp_cbea_cfg = self._default_hvp_cfg(args)
         self.hvp_cbea_cfg.update(hvp)
         self.hvp_cbea_enabled = bool(self.hvp_cbea_cfg.get("enabled", False))
+        self.hvp_train_only = bool(self.hvp_cbea_cfg.get("train_only_hvp", False))
+        self.hvp_trainable_summary = None
         if self.hvp_cbea_enabled:
             in_channels = int(self.hvp_cbea_cfg.get("in_channels", args.get("in_head", 256)))
             collaborator_in_channels = int(self.hvp_cbea_cfg.get(
@@ -57,6 +132,11 @@ class HeterPyramidCollabHvpCbea(HeterPyramidCollab):
                 refute_penalty=self.hvp_cbea_cfg.get("refute_penalty", -2.5),
                 refine_boost=self.hvp_cbea_cfg.get("refine_boost", 0.8),
             )
+            if self.hvp_train_only:
+                self._freeze_non_hvp_parameters()
+            self.hvp_trainable_summary = self._summarize_trainable_parameters()
+            if self.hvp_cbea_cfg.get("debug", False):
+                print("HVP-CBEA trainable summary:", self.hvp_trainable_summary)
 
     def forward(self, data_dict):
         output_dict = {'pyramid': 'collab'}
@@ -134,6 +214,8 @@ class HeterPyramidCollabHvpCbea(HeterPyramidCollab):
     def _apply_hvp_cbea(self, fused_feature, heter_feature_2d, record_len):
         debug = {
             "hvp_cbea_enabled": bool(self.hvp_cbea_enabled),
+            "train_only_hvp": bool(self.hvp_train_only),
+            "hvp_trainable_summary": self.hvp_trainable_summary,
             "ego_hyp_count": 0,
             "collaborator_count": 0,
             "verifier_used": False,
@@ -224,7 +306,36 @@ class HeterPyramidCollabHvpCbea(HeterPyramidCollab):
             "loss_weight_fusion": 0.2,
             "fallback_on_error": True,
             "debug": False,
+            "train_only_hvp": False,
         }
+
+    def _freeze_non_hvp_parameters(self):
+        hvp_prefixes = (
+            "hvp_collaborator_proj",
+            "hypothesis_encoder",
+            "hypothesis_verifier",
+            "bayesian_hypothesis_fusion",
+        )
+        for name, param in self.named_parameters():
+            param.requires_grad_(any(name.startswith(prefix) for prefix in hvp_prefixes))
+
+    def _summarize_trainable_parameters(self):
+        summary = {
+            "trainable_total": 0,
+            "frozen_total": 0,
+            "trainable_prefix_count": {},
+        }
+        for name, param in self.named_parameters():
+            count = int(param.numel())
+            if param.requires_grad:
+                summary["trainable_total"] += count
+                prefix = name.split(".", 1)[0]
+                summary["trainable_prefix_count"][prefix] = (
+                    summary["trainable_prefix_count"].get(prefix, 0) + count
+                )
+            else:
+                summary["frozen_total"] += count
+        return summary
 
     @staticmethod
     def _infer_collaborator_channels(args, fallback):
