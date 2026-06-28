@@ -49,3 +49,14 @@ When `model.args.supervise_single: true`, the wrapper preserves train-required s
 - `dir_preds_single`
 
 These are produced from the official per-agent BEV route: `pyramid_backbone.forward_single(heter_feature_2d)`, optional `shrink_conv`, then the shared detection heads. HVP-CBEA still only injects into the collaborative `fused_feature`.
+
+## v2.3 Autograd-safe HVP-CBEA
+
+The v2.2 fine-tune smoke reached `final_loss.backward()` and exposed an inplace autograd version error in HVP-CBEA hypothesis tensors. v2.3 makes the HVP-CBEA submodules autograd-safe:
+
+- `nn.ReLU(inplace=True)` is replaced with `nn.ReLU(inplace=False)` in HVP-CBEA submodules.
+- Novel hypotheses and updated hypotheses are rebuilt out-of-place with `torch.cat()` instead of slice assignment.
+- Hypothesis-to-BEV scatter uses out-of-place `scatter_add()` rows and `torch.stack()` instead of indexed assignment into a preallocated map.
+- HVP-CBEA outputs are not detached, so detection loss remains able to train HVP-CBEA parameters.
+
+The smoke test now includes `loss.backward()` and verifies that HVP-CBEA parameters receive gradients. `enabled=false` behavior and the `train_only_hvp` freeze rule are unchanged.

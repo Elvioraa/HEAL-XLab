@@ -16,7 +16,7 @@ from opencood.models.sub_modules.bayesian_hypothesis_fusion import BayesianHypot
 
 def main():
     torch.manual_seed(7)
-    bev = torch.randn(2, 32, 20, 24)
+    bev = torch.randn(2, 32, 20, 24, requires_grad=True)
     collab = torch.randn(3, 32, 20, 24)
 
     encoder = HypothesisEncoder(in_channels=32, mid_channels=16, max_hypotheses=8)
@@ -37,12 +37,25 @@ def main():
     assert fused.shape == bev.shape
     assert updated.shape == hyps.shape
 
+    loss = fused.sum()
+    loss.backward()
+    hvp_params = (
+        list(encoder.parameters())
+        + list(verifier.parameters())
+        + list(fusion.parameters())
+    )
+    assert any(param.grad is not None for param in hvp_params)
+    assert any(param.grad is not None for param in encoder.parameters())
+    assert any(param.grad is not None for param in verifier.parameters())
+    assert any(param.grad is not None for param in fusion.parameters())
+
     empty_hyps = bev.new_zeros((2, 0, 9))
     fused_empty, updated_empty = fusion(empty_hyps, None, None, None, bev)
     assert fused_empty.shape == bev.shape
     assert updated_empty.shape == empty_hyps.shape
 
     print("HVP-CBEA smoke OK")
+    print("HVP-CBEA backward OK")
 
 
 if __name__ == "__main__":

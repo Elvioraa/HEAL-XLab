@@ -15,7 +15,7 @@ class HypothesisVerifier(nn.Module):
         self.context = nn.Sequential(
             nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(mid_channels),
-            nn.ReLU(inplace=True),
+            nn.ReLU(inplace=False),
             nn.AdaptiveAvgPool2d(1),
         )
         self.hyp_proj = nn.Linear(9, mid_channels)
@@ -43,8 +43,12 @@ class HypothesisVerifier(nn.Module):
         refine_delta = self.refine_head(feat)
         novel_base = self.novel_head(ctx.squeeze(1)).unsqueeze(1)
         novel_hyps = novel_base.repeat(1, min(self.max_novel, max(num_hyp, 1)), 1)
-        novel_hyps[..., 7] = torch.sigmoid(novel_hyps[..., 7])
-        novel_hyps[..., 8] = (novel_hyps[..., 7] >= self.novel_threshold).to(novel_hyps.dtype)
+        novel_scores = torch.sigmoid(novel_hyps[..., 7:8])
+        novel_valid = (novel_scores >= self.novel_threshold).to(novel_hyps.dtype)
+        novel_hyps = torch.cat(
+            [novel_hyps[..., :7], novel_scores, novel_valid],
+            dim=-1,
+        )
         return verif_logits, refine_delta, novel_hyps
 
     def compute_loss(self, *args, **kwargs):
@@ -70,4 +74,3 @@ class HypothesisVerifier(nn.Module):
             if torch.is_tensor(item):
                 return item
         return None
-

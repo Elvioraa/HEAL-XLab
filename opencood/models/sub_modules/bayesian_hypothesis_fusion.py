@@ -17,7 +17,7 @@ class BayesianHypothesisFusion(nn.Module):
         self.hyp_proj = nn.Sequential(
             nn.Conv2d(1, mid_channels, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(mid_channels),
-            nn.ReLU(inplace=True),
+            nn.ReLU(inplace=False),
             nn.Conv2d(mid_channels, in_channels, kernel_size=1),
         )
         self.gate = nn.Sequential(
@@ -47,22 +47,21 @@ class BayesianHypothesisFusion(nn.Module):
         return ref.sum() * 0.0
 
     def _update_hypotheses(self, ego_hyps, verif_logits, refine_delta):
-        updated = ego_hyps.clone()
         if verif_logits is None or refine_delta is None:
-            return updated
+            return ego_hyps
         probs = torch.softmax(verif_logits, dim=-1)
-        log_odds = torch.logit(torch.clamp(updated[..., 7], 1e-4, 1.0 - 1e-4))
-        log_odds = log_odds + probs[..., 0] * self.confirm_boost
-        log_odds = log_odds + probs[..., 1] * self.refute_penalty
-        log_odds = log_odds + probs[..., 2] * self.refine_boost
-        updated[..., 7] = torch.sigmoid(log_odds)
-        updated[..., :7] = updated[..., :7] + refine_delta[..., :7] * probs[..., 2:3]
-        updated[..., 8] = (updated[..., 7] > 0.05).to(updated.dtype)
-        return updated
+        base_score = torch.clamp(ego_hyps[..., 7:8], 1e-4, 1.0 - 1e-4)
+        log_odds = torch.logit(base_score)
+        log_odds = log_odds + probs[..., 0:1] * self.confirm_boost
+        log_odds = log_odds + probs[..., 1:2] * self.refute_penalty
+        log_odds = log_odds + probs[..., 2:3] * self.refine_boost
+        updated_score = torch.sigmoid(log_odds)
+        updated_box = ego_hyps[..., :7] + refine_delta[..., :7] * probs[..., 2:3]
+        updated_valid = (updated_score > 0.05).to(ego_hyps.dtype)
+        return torch.cat([updated_box, updated_score, updated_valid], dim=-1)
 
     def _scatter(self, hyps, novel_hyps, ref_feat):
         bsz, _, height, width = ref_feat.shape
-        out = ref_feat.new_zeros((bsz, 1, height, width))
         all_hyps = hyps
         if novel_hyps is not None and torch.is_tensor(novel_hyps) and novel_hyps.numel() > 0:
             all_hyps = torch.cat([hyps, novel_hyps.to(device=hyps.device, dtype=hyps.dtype)], dim=1)
@@ -70,11 +69,16 @@ class BayesianHypothesisFusion(nn.Module):
         x = ((all_hyps[..., 0] - x_min) / max(x_max - x_min, 1e-6) * width).long()
         y = ((all_hyps[..., 1] - y_min) / max(y_max - y_min, 1e-6) * height).long()
         valid = (all_hyps[..., 8] > 0) & (x >= 0) & (x < width) & (y >= 0) & (y < height)
+        rows = []
         for bidx in range(bsz):
+            flat = ref_feat.new_zeros((height * width,))
             if not torch.any(valid[bidx]):
+                rows.append(flat)
                 continue
-            out[bidx, 0, y[bidx][valid[bidx]], x[bidx][valid[bidx]]] = all_hyps[bidx, valid[bidx], 7]
-        return out
+            flat_idx = y[bidx][valid[bidx]] * width + x[bidx][valid[bidx]]
+            values = all_hyps[bidx, valid[bidx], 7]
+            rows.append(flat.scatter_add(0, flat_idx, values))
+        return torch.stack(rows, dim=0).view(bsz, 1, height, width)
 
     @staticmethod
     def _find_tensor(args, kwargs):
@@ -82,4 +86,3 @@ class BayesianHypothesisFusion(nn.Module):
             if torch.is_tensor(item):
                 return item
         return None
-

@@ -17,7 +17,7 @@ class HypothesisEncoder(nn.Module):
         self.stem = nn.Sequential(
             nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(mid_channels),
-            nn.ReLU(inplace=True),
+            nn.ReLU(inplace=False),
         )
         self.hmap_head = nn.Conv2d(mid_channels, 1, kernel_size=1)
         self.reg_head = nn.Conv2d(mid_channels, 7, kernel_size=1)
@@ -77,4 +77,3 @@ class HypothesisEncoder(nn.Module):
             if torch.is_tensor(item):
                 return item
         return None
-

@@ -344,6 +344,48 @@ Base hash: `e3ac402`
 - `train_only_hvp` freeze prefixes and behavior are unchanged.
 - No logs config is added.
 
+## HEAL-XLab-v2.3 autograd inplace fix
+
+Base hash: `45630d4`
+
+### Server Finding
+
+- v2.2 fine-tune smoke fixed `cls_preds_single`, reached loss computation, and failed at `final_loss.backward()`.
+- Error:
+  - `RuntimeError: one of the variables needed for gradient computation has been modified by an inplace operation`
+- The failing tensor shape `[1, 50]` was consistent with hypothesis-level tensors used inside HVP-CBEA.
+
+### Root Cause
+
+- HVP-CBEA submodules contained autograd-risky operations:
+  - `nn.ReLU(inplace=True)` in `HypothesisEncoder`, `HypothesisVerifier`, and `BayesianHypothesisFusion`.
+  - Slice writes into `novel_hyps` in `HypothesisVerifier`.
+  - Slice writes into `updated` hypotheses in `BayesianHypothesisFusion`.
+  - Indexed assignment into the BEV scatter map in `BayesianHypothesisFusion._scatter()`.
+
+### Fix
+
+- `opencood/models/sub_modules/hypothesis_encoder.py`
+  - Changes HVP activation to `nn.ReLU(inplace=False)`.
+- `opencood/models/sub_modules/hypothesis_verifier.py`
+  - Changes HVP activation to `nn.ReLU(inplace=False)`.
+  - Rebuilds novel hypotheses with `torch.cat()` instead of slice assignment.
+- `opencood/models/sub_modules/bayesian_hypothesis_fusion.py`
+  - Changes HVP activation to `nn.ReLU(inplace=False)`.
+  - Rebuilds updated hypotheses with `torch.cat()` instead of slice assignment.
+  - Replaces indexed BEV map assignment with out-of-place per-batch `scatter_add()` followed by `torch.stack()`.
+- `opencood/tools/check_hvp_cbea_smoke.py`
+  - Adds a backward smoke test and checks that HVP-CBEA module parameters receive gradients.
+
+### Safety
+
+- HVP-CBEA outputs are not detached; detection loss can still backpropagate into `hypothesis_encoder`, `hypothesis_verifier`, `bayesian_hypothesis_fusion`, and collaborator projection modules.
+- Official `heter_pyramid_collab.py` is not modified.
+- `enabled=false` behavior is unchanged.
+- `train_only_hvp` freeze prefixes and behavior are unchanged.
+- v1 HBEC is not modified.
+- No logs config is added.
+
 ## HEAL-XLab-v1.1-logfmt
 
 Change:
