@@ -25,6 +25,11 @@ model:
       loss_weight_fusion: 0.2
       fallback_on_error: true
       train_only_hvp: false
+      residual_gate:
+        enabled: true
+        alpha_init: 0.05
+        alpha_max: 0.3
+        learnable: true
       debug: false
 ```
 
@@ -52,6 +57,11 @@ model:
       enabled: true
       train_only_hvp: true
       fallback_on_error: true
+      residual_gate:
+        enabled: true
+        alpha_init: 0.05
+        alpha_max: 0.3
+        learnable: true
       debug: true
 ```
 
@@ -69,3 +79,23 @@ This is intended for full collaborative fine-tuning from a HEAL_m1_based final_i
 When `enabled: true` and `train_only_hvp: true`, inherited HEAL BatchNorm and SyncBatchNorm modules are kept in eval mode during training. This freezes their `running_mean`, `running_var`, and `num_batches_tracked` buffers in addition to freezing inherited HEAL parameters with `requires_grad=False`.
 
 HVP-CBEA module BatchNorm layers remain in train mode and can update normally. With `enabled: false`, the wrapper still follows the official HEAL behavior and skips HVP-CBEA logic.
+
+## v2.5 Residual Gate / Identity-start
+
+If `residual_gate` is omitted, these defaults are used:
+
+```yaml
+residual_gate:
+  enabled: true
+  alpha_init: 0.05
+  alpha_max: 0.3
+  learnable: true
+```
+
+With the gate enabled, HVP-CBEA applies its BEV feature update as:
+
+```text
+fused_feature_out = fused_feature + alpha * delta_feature
+```
+
+`alpha` is stored inside `bayesian_hypothesis_fusion` as a bounded residual parameter. The default initialization is close to identity, reducing the chance that untrained HVP-CBEA modules strongly disturb the inherited HEAL feature. `train_only_hvp: true` still trains only HVP-CBEA prefixes, and the v2.4 non-HVP BatchNorm buffer freeze remains active.

@@ -25,6 +25,7 @@ HVP-CBEA is a model-forward-level experimental direction. It is independent of v
 - Loss integration is safe and optional through `output_dict['hvp_cbea_loss']`.
 - v2.1 adds `train_only_hvp`, allowing full collaborative fine-tuning while freezing official HEAL parameters.
 - v2.4 keeps inherited HEAL BatchNorm buffers frozen in `train_only_hvp` mode while leaving HVP-CBEA modules trainable.
+- v2.5 wraps the HVP-CBEA feature update in a bounded residual gate for identity-start safety.
 - GT-dependent auxiliary losses are defensive and return zero when GT format is not available.
 - No inference-time GT is used.
 - No raw camera feature bypass is introduced.
@@ -72,3 +73,24 @@ v2.4 tightens the freeze rule:
 - HVP-CBEA modules still return to train mode after `model.train()`, so their parameters and internal BatchNorm statistics can train normally.
 - `enabled=false` remains equivalent to the official HEAL forward path.
 - The debug summary reports `train_only_hvp`, `frozen_bn_eval_count`, and `hvp_bn_train_count`.
+
+## v2.5 Residual Gate / Identity-start
+
+The v2.4 standard final_infer result improved AP@0.3 and AP@0.5 clearly and kept AP@0.7 positive across all CAV settings, but high-IoU localization still lagged the +3pp target. The next safety patch makes the HVP-CBEA BEV update less aggressive:
+
+```text
+fused_feature_out = fused_feature + alpha * delta_feature
+```
+
+`BayesianHypothesisFusion` still builds the hypothesis evidence feature and internal feature gate, but the direct replacement is converted into `delta_feature`. A bounded residual alpha then scales the update before it reaches the official detection heads.
+
+Default residual gate:
+
+- `enabled=true`
+- `alpha_init=0.05`
+- `alpha_max=0.3`
+- `learnable=true`
+
+The alpha parameter lives inside `bayesian_hypothesis_fusion`, so `train_only_hvp=true` keeps it trainable under the existing HVP-CBEA prefix rule. The output is not detached, and detection loss can still backpropagate through `bayesian_hypothesis_fusion`, `hypothesis_verifier`, `hypothesis_encoder`, and the collaborator projection.
+
+Debug fields include `hvp_cbea_residual_alpha`, `hvp_cbea_delta_norm`, `hvp_cbea_delta_mean`, and `hvp_cbea_delta_std`. The smoke test checks that residual alpha exists and receives gradient. Follow-up server work should run an enabled=true untrained sanity pass and a short `train_only_hvp` fine-tune.

@@ -106,6 +106,9 @@ class HeterPyramidCollabHvpCbea(HeterPyramidCollab):
         hvp = args.get("hvp_cbea", {}) or {}
         self.hvp_cbea_cfg = self._default_hvp_cfg(args)
         self.hvp_cbea_cfg.update(hvp)
+        self.hvp_cbea_cfg["residual_gate"] = self._normalize_residual_gate_cfg(
+            self.hvp_cbea_cfg.get("residual_gate")
+        )
         self.hvp_cbea_enabled = bool(self.hvp_cbea_cfg.get("enabled", False))
         self.hvp_train_only = bool(self.hvp_cbea_cfg.get("train_only_hvp", False))
         self.hvp_trainable_summary = None
@@ -140,6 +143,7 @@ class HeterPyramidCollabHvpCbea(HeterPyramidCollab):
                 confirm_boost=self.hvp_cbea_cfg.get("confirm_boost", 1.5),
                 refute_penalty=self.hvp_cbea_cfg.get("refute_penalty", -2.5),
                 refine_boost=self.hvp_cbea_cfg.get("refine_boost", 0.8),
+                residual_gate=self.hvp_cbea_cfg.get("residual_gate"),
             )
             if self.hvp_train_only:
                 self._freeze_non_hvp_parameters()
@@ -258,6 +262,8 @@ class HeterPyramidCollabHvpCbea(HeterPyramidCollab):
             "feature_shape_before": list(fused_feature.shape),
             "feature_shape_after": list(fused_feature.shape),
         }
+        if self.hvp_cbea_enabled:
+            debug.update(self.bayesian_hypothesis_fusion.get_residual_debug())
         if not self.hvp_cbea_enabled:
             return fused_feature, debug, None
 
@@ -280,6 +286,7 @@ class HeterPyramidCollabHvpCbea(HeterPyramidCollab):
                 novel_hyps,
                 fused_feature,
             )
+            debug.update(self.bayesian_hypothesis_fusion.get_residual_debug())
             debug["updated_hyp_count"] = int((updated_hyps[..., 8] > 0).sum().detach().cpu()) if updated_hyps is not None else 0
             debug["feature_shape_after"] = list(fused_feature_out.shape)
             hvp_loss = self._compute_hvp_loss(hmap, reg, verif_logits, updated_hyps)
@@ -339,7 +346,30 @@ class HeterPyramidCollabHvpCbea(HeterPyramidCollab):
             "fallback_on_error": True,
             "debug": False,
             "train_only_hvp": False,
+            "residual_gate": self._default_residual_gate_cfg(),
         }
+
+    @staticmethod
+    def _default_residual_gate_cfg():
+        return {
+            "enabled": True,
+            "alpha_init": 0.05,
+            "alpha_max": 0.3,
+            "learnable": True,
+        }
+
+    @classmethod
+    def _normalize_residual_gate_cfg(cls, cfg):
+        normalized = cls._default_residual_gate_cfg()
+        if isinstance(cfg, bool):
+            normalized["enabled"] = cfg
+        elif isinstance(cfg, dict):
+            normalized.update(cfg)
+        normalized["enabled"] = bool(normalized.get("enabled", True))
+        normalized["alpha_init"] = float(normalized.get("alpha_init", 0.05))
+        normalized["alpha_max"] = float(normalized.get("alpha_max", 0.3))
+        normalized["learnable"] = bool(normalized.get("learnable", True))
+        return normalized
 
     def _freeze_non_hvp_parameters(self):
         for name, param in self.named_parameters():

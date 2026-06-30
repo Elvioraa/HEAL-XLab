@@ -423,6 +423,56 @@ Base hash: `e02731c`
 - v1 HBEC is not modified.
 - No logs config is added.
 
+## HEAL-XLab-v2.5 residual gate / identity-start
+
+Base hash: `180f553`
+
+### Server Finding
+
+- v2.4 standard final_infer best result came from `v24_lr2em4_ep6_epoch4_standard`.
+- Epoch4 improved AP@0.3 and AP@0.5 clearly across all CAV settings and kept AP@0.7 positive:
+  - `use_cav1: 0.8122 / 0.7909 / 0.6882`
+  - `use_cav2: 0.8621 / 0.8355 / 0.7298`
+  - `use_cav3: 0.9092 / 0.8911 / 0.8078`
+  - `use_cav4: 0.9100 / 0.8920 / 0.8082`
+- The high-IoU AP@0.7 gain is still below the +3pp target, suggesting HVP-CBEA helps discovery and medium-quality boxes more than high-precision localization.
+
+### Goal
+
+- Make the HVP-CBEA update to `fused_feature` a controlled residual instead of a strong direct replacement.
+- Keep HVP-CBEA trainable from detection loss without detaching outputs.
+- Preserve `enabled=false`, `train_only_hvp`, supervise-single compatibility, and the v2.4 non-HVP BN freeze.
+
+### Fix
+
+- `opencood/models/sub_modules/bayesian_hypothesis_fusion.py`
+  - Converts the previous direct fusion candidate into `delta_feature`.
+  - Applies `fused_feature_out = fused_feature + alpha * delta_feature`.
+  - Adds bounded residual alpha as `alpha_max * sigmoid(residual_alpha_logit)`.
+  - Defaults to `alpha_init=0.05`, `alpha_max=0.3`, and `learnable=true`.
+- `opencood/models/heter_pyramid_collab_hvp_cbea.py`
+  - Adds and normalizes `model.args.hvp_cbea.residual_gate`.
+  - Passes the residual gate config into `BayesianHypothesisFusion`.
+  - Adds debug fields for residual alpha and delta feature statistics while preserving train-only and BN summaries.
+- `opencood/tools/check_hvp_cbea_smoke.py`
+  - Checks residual alpha existence, bounds, and gradient after backward.
+  - Prints `HVP-CBEA residual gate OK`.
+
+### Safety
+
+- Official `heter_pyramid_collab.py` is not modified.
+- `enabled=false` behavior is unchanged.
+- `train_only_hvp=true` still trains only HVP-CBEA prefixes; the new alpha lives under `bayesian_hypothesis_fusion`.
+- Non-HVP HEAL parameters and BatchNorm buffers remain frozen in train-only mode.
+- HVP-CBEA internal BatchNorm modules remain trainable and update normally.
+- v1 HBEC is not modified.
+- No logs config is added.
+
+### Follow-up
+
+- Run an `enabled=true` untrained sanity final_infer to verify identity-start behavior.
+- Run a short `train_only_hvp` fine-tune to test whether the safer residual update improves AP@0.7.
+
 ## HEAL-XLab-v1.1-logfmt
 
 Change:

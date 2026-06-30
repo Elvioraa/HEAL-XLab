@@ -36,6 +36,13 @@ def main():
     fused, updated = fusion(hyps, logits, delta, novel, bev)
     assert fused.shape == bev.shape
     assert updated.shape == hyps.shape
+    residual_debug = fusion.get_residual_debug()
+    assert residual_debug["hvp_cbea_residual_gate_enabled"]
+    assert residual_debug["hvp_cbea_residual_fallback_reason"] == ""
+    assert abs(residual_debug["hvp_cbea_residual_alpha"] - 0.05) < 1e-5
+    assert residual_debug["hvp_cbea_residual_alpha"] <= 0.3
+    assert residual_debug["hvp_cbea_delta_norm"] > 0.0
+    assert isinstance(fusion.residual_alpha_logit, torch.nn.Parameter)
 
     loss = fused.sum()
     loss.backward()
@@ -48,6 +55,9 @@ def main():
     assert any(param.grad is not None for param in encoder.parameters())
     assert any(param.grad is not None for param in verifier.parameters())
     assert any(param.grad is not None for param in fusion.parameters())
+    assert fusion.residual_alpha_logit.grad is not None
+    assert torch.isfinite(fusion.residual_alpha_logit.grad).all()
+    assert fusion.residual_alpha_logit.grad.detach().abs().sum() > 0
 
     empty_hyps = bev.new_zeros((2, 0, 9))
     fused_empty, updated_empty = fusion(empty_hyps, None, None, None, bev)
@@ -56,6 +66,7 @@ def main():
 
     print("HVP-CBEA smoke OK")
     print("HVP-CBEA backward OK")
+    print("HVP-CBEA residual gate OK")
 
 
 if __name__ == "__main__":
