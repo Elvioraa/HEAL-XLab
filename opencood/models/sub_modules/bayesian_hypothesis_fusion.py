@@ -59,12 +59,7 @@ class BayesianHypothesisFusion(nn.Module):
             gate = self.gate(torch.cat([ego_bev_feat, hyp_feat], dim=1))
             candidate = ego_bev_feat * (1.0 - gate) + hyp_feat * gate
             delta_feature = candidate - ego_bev_feat
-            alpha = self._residual_alpha().to(device=ego_bev_feat.device, dtype=ego_bev_feat.dtype)
-            if self.residual_gate_enabled:
-                fused = ego_bev_feat + alpha * delta_feature
-            else:
-                fused = candidate
-            self.last_residual_debug = self._make_residual_debug(alpha, delta_feature)
+            fused = self.apply_residual_delta(ego_bev_feat, delta_feature)
             return fused, updated_hyps
         except Exception:
             self.last_residual_debug = self._make_residual_debug(fallback_reason="exception")
@@ -112,6 +107,15 @@ class BayesianHypothesisFusion(nn.Module):
 
     def get_residual_debug(self):
         return dict(self.last_residual_debug)
+
+    def apply_residual_delta(self, ego_bev_feat, delta_feature):
+        alpha = self._residual_alpha().to(device=ego_bev_feat.device, dtype=ego_bev_feat.dtype)
+        if self.residual_gate_enabled:
+            fused = ego_bev_feat + alpha * delta_feature
+        else:
+            fused = ego_bev_feat + delta_feature
+        self.last_residual_debug = self._make_residual_debug(alpha, delta_feature)
+        return fused
 
     def _residual_alpha(self):
         if not self.residual_gate_enabled:

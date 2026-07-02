@@ -26,6 +26,7 @@ HVP-CBEA is a model-forward-level experimental direction. It is independent of v
 - v2.1 adds `train_only_hvp`, allowing full collaborative fine-tuning while freezing official HEAL parameters.
 - v2.4 keeps inherited HEAL BatchNorm buffers frozen in `train_only_hvp` mode while leaving HVP-CBEA modules trainable.
 - v2.5 wraps the HVP-CBEA feature update in a bounded residual gate for identity-start safety.
+- v3.0 adds an optional packet communication path for low-bandwidth cross-vendor experiments.
 - GT-dependent auxiliary losses are defensive and return zero when GT format is not available.
 - No inference-time GT is used.
 - No raw camera feature bypass is introduced.
@@ -94,3 +95,18 @@ Default residual gate:
 The alpha parameter lives inside `bayesian_hypothesis_fusion`, so `train_only_hvp=true` keeps it trainable under the existing HVP-CBEA prefix rule. The output is not detached, and detection loss can still backpropagate through `bayesian_hypothesis_fusion`, `hypothesis_verifier`, `hypothesis_encoder`, and the collaborator projection.
 
 Debug fields include `hvp_cbea_residual_alpha`, `hvp_cbea_delta_norm`, `hvp_cbea_delta_mean`, and `hvp_cbea_delta_std`. The smoke test checks that residual alpha exists and receives gradient. Follow-up server work should run an enabled=true untrained sanity pass and a short `train_only_hvp` fine-tune.
+
+## v3.0 Packet Mode
+
+Packet mode is a deployment-oriented experimental path for the no-raw-data, no-dense-feature-sharing setting. It is controlled by `model.args.hvp_cbea.packet.enabled` and defaults to `false`.
+
+When `packet.enabled=false`, v2.5 behavior is unchanged: collaborator BEV features can still enter the existing HVP-CBEA verifier/fusion path. When `packet.enabled=true`, collaborator BEV features are used only before the communication boundary to generate compact packets. The ego-side packet aggregator receives standardized hypothesis/evidence packets and produces a residual delta feature; it does not consume dense collaborator BEV features.
+
+The first packet implementation contains:
+
+- `HypothesisEvidencePacketizer`: feature heatmap top-K pseudo hypotheses and descriptors.
+- `PacketCompressor`: fp32/fp16/int8 communication simulation and budget masking.
+- `PacketAggregator`: uncertainty-aware packet weighting and trainable packet-to-BEV delta projection.
+- `PacketCommunicationMeter`: bytes, KB/frame, estimated Mbps, top-K, quantization, and budget saturation stats.
+
+The packetizer currently uses normalized pseudo boxes from top-K feature locations as an interface placeholder. Future work can replace this with real detector box decoding without changing the packet aggregator boundary.

@@ -30,6 +30,20 @@ model:
         alpha_init: 0.05
         alpha_max: 0.3
         learnable: true
+      packet:
+        enabled: false
+        mode: packet_one_round
+        topk: 50
+        packet_dim: 16
+        descriptor_dim: 8
+        quantize: fp16
+        send_uncertainty: true
+        send_agent_quality: true
+        send_timestamp: true
+        bandwidth_budget_kb: 8
+        deadline_ms: 100
+        detach_packet: false
+        debug: false
       debug: false
 ```
 
@@ -62,6 +76,8 @@ model:
         alpha_init: 0.05
         alpha_max: 0.3
         learnable: true
+      packet:
+        enabled: false
       debug: true
 ```
 
@@ -71,6 +87,10 @@ When `train_only_hvp: true`, official HEAL backbone parameters are frozen and on
 - `hypothesis_encoder`
 - `hypothesis_verifier`
 - `bayesian_hypothesis_fusion`
+- `hvp_packetizer`
+- `hvp_packet_compressor`
+- `hvp_packet_aggregator`
+- `hvp_packet_comm_meter`
 
 This is intended for full collaborative fine-tuning from a HEAL_m1_based final_infer checkpoint. It is not intended for the official `heter_pyramid_single` stage2/m2 yaml path.
 
@@ -99,3 +119,26 @@ fused_feature_out = fused_feature + alpha * delta_feature
 ```
 
 `alpha` is stored inside `bayesian_hypothesis_fusion` as a bounded residual parameter. The default initialization is close to identity, reducing the chance that untrained HVP-CBEA modules strongly disturb the inherited HEAL feature. `train_only_hvp: true` still trains only HVP-CBEA prefixes, and the v2.4 non-HVP BatchNorm buffer freeze remains active.
+
+## v3.0 Packet Mode
+
+Packet mode is disabled by default. If the `packet` field is omitted, the effective default is:
+
+```yaml
+packet:
+  enabled: false
+  mode: packet_one_round
+  topk: 50
+  packet_dim: 16
+  descriptor_dim: 8
+  quantize: fp16
+  send_uncertainty: true
+  send_agent_quality: true
+  send_timestamp: true
+  bandwidth_budget_kb: 8
+  deadline_ms: 100
+  detach_packet: false
+  debug: false
+```
+
+When `packet.enabled: false`, HVP-CBEA uses the v2.5 feature path unchanged. When `packet.enabled: true`, collaborator features are only used inside the local packetizer to produce compact hypothesis/evidence packets; the ego-side packet aggregator receives packets, not dense collaborator BEV features.

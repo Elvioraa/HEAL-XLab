@@ -86,6 +86,12 @@ from opencood.models.heter_pyramid_collab import HeterPyramidCollab
 from opencood.models.sub_modules.hypothesis_encoder import HypothesisEncoder
 from opencood.models.sub_modules.hypothesis_verifier import HypothesisVerifier
 from opencood.models.sub_modules.bayesian_hypothesis_fusion import BayesianHypothesisFusion
+from opencood.models.sub_modules.hvp_cbea_packet import (
+    HypothesisEvidencePacketizer,
+    PacketAggregator,
+    PacketCommunicationMeter,
+    PacketCompressor,
+)
 from opencood.utils.transformation_utils import normalize_pairwise_tfm
 
 
@@ -97,6 +103,10 @@ class HeterPyramidCollabHvpCbea(HeterPyramidCollab):
         "hypothesis_encoder",
         "hypothesis_verifier",
         "bayesian_hypothesis_fusion",
+        "hvp_packetizer",
+        "hvp_packet_compressor",
+        "hvp_packet_aggregator",
+        "hvp_packet_comm_meter",
     )
     BN_TYPES = (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d, nn.SyncBatchNorm)
 
@@ -109,8 +119,12 @@ class HeterPyramidCollabHvpCbea(HeterPyramidCollab):
         self.hvp_cbea_cfg["residual_gate"] = self._normalize_residual_gate_cfg(
             self.hvp_cbea_cfg.get("residual_gate")
         )
+        self.hvp_cbea_cfg["packet"] = self._normalize_packet_cfg(
+            self.hvp_cbea_cfg.get("packet")
+        )
         self.hvp_cbea_enabled = bool(self.hvp_cbea_cfg.get("enabled", False))
         self.hvp_train_only = bool(self.hvp_cbea_cfg.get("train_only_hvp", False))
+        self.hvp_packet_enabled = bool(self.hvp_cbea_cfg["packet"].get("enabled", False))
         self.hvp_trainable_summary = None
         if self.hvp_cbea_enabled:
             in_channels = int(self.hvp_cbea_cfg.get("in_channels", args.get("in_head", 256)))
@@ -145,6 +159,39 @@ class HeterPyramidCollabHvpCbea(HeterPyramidCollab):
                 refine_boost=self.hvp_cbea_cfg.get("refine_boost", 0.8),
                 residual_gate=self.hvp_cbea_cfg.get("residual_gate"),
             )
+            if self.hvp_packet_enabled:
+                packet_cfg = self.hvp_cbea_cfg["packet"]
+                self.hvp_packetizer = HypothesisEvidencePacketizer(
+                    in_channels=in_channels,
+                    topk=packet_cfg.get("topk", 50),
+                    packet_dim=packet_cfg.get("packet_dim", 16),
+                    descriptor_dim=packet_cfg.get("descriptor_dim", 8),
+                    send_uncertainty=packet_cfg.get("send_uncertainty", True),
+                    send_agent_quality=packet_cfg.get("send_agent_quality", True),
+                    send_timestamp=packet_cfg.get("send_timestamp", True),
+                )
+                self.hvp_packet_compressor = PacketCompressor(
+                    quantize=packet_cfg.get("quantize", "fp16"),
+                    bandwidth_budget_kb=packet_cfg.get("bandwidth_budget_kb", 8),
+                    topk=packet_cfg.get("topk", 50),
+                    descriptor_dim=packet_cfg.get("descriptor_dim", 8),
+                    packet_dim=packet_cfg.get("packet_dim", 16),
+                    deadline_ms=packet_cfg.get("deadline_ms", 100),
+                    detach_packet=packet_cfg.get("detach_packet", False),
+                )
+                self.hvp_packet_aggregator = PacketAggregator(
+                    context_channels=in_channels,
+                    packet_dim=packet_cfg.get("packet_dim", 16),
+                    descriptor_dim=packet_cfg.get("descriptor_dim", 8),
+                )
+                self.hvp_packet_comm_meter = PacketCommunicationMeter(
+                    quantize=packet_cfg.get("quantize", "fp16"),
+                    topk=packet_cfg.get("topk", 50),
+                    descriptor_dim=packet_cfg.get("descriptor_dim", 8),
+                    packet_dim=packet_cfg.get("packet_dim", 16),
+                    bandwidth_budget_kb=packet_cfg.get("bandwidth_budget_kb", 8),
+                    deadline_ms=packet_cfg.get("deadline_ms", 100),
+                )
             if self.hvp_train_only:
                 self._freeze_non_hvp_parameters()
                 self._set_frozen_heal_modules_eval()
@@ -262,6 +309,8 @@ class HeterPyramidCollabHvpCbea(HeterPyramidCollab):
             "feature_shape_before": list(fused_feature.shape),
             "feature_shape_after": list(fused_feature.shape),
         }
+        if self.hvp_packet_enabled:
+            debug.update(self._packet_debug_defaults())
         if self.hvp_cbea_enabled:
             debug.update(self.bayesian_hypothesis_fusion.get_residual_debug())
         if not self.hvp_cbea_enabled:
@@ -270,6 +319,25 @@ class HeterPyramidCollabHvpCbea(HeterPyramidCollab):
         try:
             ego_hyps, hmap, reg = self.hypothesis_encoder(fused_feature)
             debug["ego_hyp_count"] = int((ego_hyps[..., 8] > 0).sum().detach().cpu()) if ego_hyps is not None else 0
+            if self.hvp_packet_enabled:
+                packet_result, packet_debug = self._apply_hvp_packet_mode(
+                    fused_feature=fused_feature,
+                    heter_feature_2d=heter_feature_2d,
+                    record_len=record_len,
+                    ego_hyps=ego_hyps,
+                )
+                debug.update(packet_debug)
+                if packet_result is not None:
+                    fused_feature_out, updated_hyps = packet_result
+                    debug.update(self.bayesian_hypothesis_fusion.get_residual_debug())
+                    debug["updated_hyp_count"] = int((updated_hyps[..., 8] > 0).sum().detach().cpu()) if updated_hyps is not None else 0
+                    debug["feature_shape_after"] = list(fused_feature_out.shape)
+                    hvp_loss = self._compute_hvp_loss(hmap, reg, None, updated_hyps)
+                    debug["hvp_loss"] = float(hvp_loss.detach().cpu()) if torch.is_tensor(hvp_loss) else 0.0
+                    return fused_feature_out, debug, hvp_loss
+                if not self.hvp_cbea_cfg.get("fallback_on_error", True):
+                    raise RuntimeError(packet_debug.get("packet_fallback_reason", "packet_mode_failed"))
+
             collaborator_feat = self._collect_collaborator_features(heter_feature_2d, record_len)
             debug["collaborator_count"] = int(collaborator_feat.shape[0]) if collaborator_feat is not None else 0
             if collaborator_feat is None:
@@ -297,6 +365,117 @@ class HeterPyramidCollabHvpCbea(HeterPyramidCollab):
                 debug["fallback_reason"] = "exception:%s" % type(exc).__name__
                 return fused_feature, debug, fused_feature.sum() * 0.0
             raise
+
+    def _apply_hvp_packet_mode(self, fused_feature, heter_feature_2d, record_len, ego_hyps):
+        debug = self._packet_debug_defaults()
+        try:
+            packet = self._build_hvp_scene_packet(heter_feature_2d, record_len, fused_feature)
+            if packet is None:
+                debug["packet_fallback_reason"] = "no_compatible_collaborator_features"
+                return None, debug
+            compressed_packet, comm_stats = self.hvp_packet_compressor(packet)
+            packet_delta, aggregation_debug, aggregation_stats = self.hvp_packet_aggregator(
+                fused_feature,
+                compressed_packet,
+                ego_hypotheses=ego_hyps,
+            )
+            fused_feature_out = self.bayesian_hypothesis_fusion.apply_residual_delta(
+                fused_feature,
+                packet_delta,
+            )
+            debug.update(comm_stats)
+            debug.update(aggregation_debug)
+            debug.update(aggregation_stats)
+            debug["packet_used"] = True
+            debug["packet_delta_norm"] = float(packet_delta.detach().float().norm().cpu())
+            debug["packet_fallback_reason"] = ""
+            return (fused_feature_out, ego_hyps), debug
+        except Exception as exc:
+            if not self.hvp_cbea_cfg.get("fallback_on_error", True):
+                raise RuntimeError("HVP packet mode failed: %s" % exc) from exc
+            debug["packet_fallback_reason"] = "exception:%s" % type(exc).__name__
+            return None, debug
+
+    def _build_hvp_scene_packet(self, heter_feature_2d, record_len, fused_feature):
+        groups = self._collect_collaborator_feature_groups(heter_feature_2d, record_len)
+        if not groups or all(group is None for group in groups):
+            return None
+        packets = []
+        for group in groups:
+            if group is None:
+                packets.append(self.hvp_packetizer.empty_packet(
+                    batch_size=1,
+                    device=fused_feature.device,
+                    dtype=fused_feature.dtype,
+                ))
+                continue
+            packet = self.hvp_packetizer(group)
+            packets.append(self._flatten_packet_batch(packet))
+        return self._stack_scene_packets(packets, fused_feature)
+
+    def _collect_collaborator_feature_groups(self, heter_feature_2d, record_len):
+        if heter_feature_2d is None or heter_feature_2d.ndim != 4:
+            return []
+        lengths = record_len.detach().cpu().tolist() if torch.is_tensor(record_len) else list(record_len)
+        groups = []
+        start = 0
+        for length in lengths:
+            length = int(length)
+            if length > 1:
+                groups.append(self.hvp_collaborator_proj(heter_feature_2d[start + 1:start + length]))
+            else:
+                groups.append(None)
+            start += length
+        return groups
+
+    @staticmethod
+    def _flatten_packet_batch(packet):
+        flat = {}
+        for key, value in packet.items():
+            if torch.is_tensor(value) and value.ndim >= 3:
+                flat[key] = value.reshape(1, value.shape[0] * value.shape[1], value.shape[-1])
+            elif key == "valid_mask" and torch.is_tensor(value):
+                flat[key] = value.reshape(1, value.shape[0] * value.shape[1])
+            else:
+                flat[key] = value
+        return flat
+
+    def _stack_scene_packets(self, packets, ref_feature):
+        max_k = max(int(packet["valid_mask"].shape[1]) for packet in packets)
+        stacked = {"metadata": {"scene_count": len(packets), "packet_mode": self.hvp_cbea_cfg["packet"]["mode"]}}
+        tensor_keys = ("boxes", "centers", "scores", "uncertainty", "descriptor", "agent_quality")
+        for key in tensor_keys:
+            values = [self._pad_packet_tensor(packet[key], max_k) for packet in packets]
+            stacked[key] = torch.cat(values, dim=0).to(device=ref_feature.device, dtype=ref_feature.dtype)
+        masks = [self._pad_packet_tensor(packet["valid_mask"], max_k, value=False) for packet in packets]
+        stacked["valid_mask"] = torch.cat(masks, dim=0).to(device=ref_feature.device, dtype=torch.bool)
+        stacked["estimated_bytes"] = torch.tensor(0, device=ref_feature.device, dtype=torch.long)
+        return stacked
+
+    @staticmethod
+    def _pad_packet_tensor(tensor, target_k, value=0.0):
+        current_k = int(tensor.shape[1])
+        if current_k >= target_k:
+            return tensor
+        pad_shape = list(tensor.shape)
+        pad_shape[1] = target_k - current_k
+        pad = tensor.new_full(pad_shape, value)
+        return torch.cat([tensor, pad], dim=1)
+
+    def _packet_debug_defaults(self):
+        cfg = self.hvp_cbea_cfg["packet"]
+        return {
+            "packet_enabled": bool(self.hvp_packet_enabled),
+            "packet_used": False,
+            "packet_mode": cfg.get("mode", "packet_one_round"),
+            "packet_topk": int(cfg.get("topk", 50)),
+            "packet_quantize": cfg.get("quantize", "fp16"),
+            "packet_fallback_reason": "",
+            "packet_delta_norm": 0.0,
+            "bytes_per_frame": 0.0,
+            "kb_per_frame": 0.0,
+            "budget_saturated": False,
+        }
 
     def _collect_collaborator_features(self, heter_feature_2d, record_len):
         if heter_feature_2d is None or heter_feature_2d.ndim != 4:
@@ -347,6 +526,7 @@ class HeterPyramidCollabHvpCbea(HeterPyramidCollab):
             "debug": False,
             "train_only_hvp": False,
             "residual_gate": self._default_residual_gate_cfg(),
+            "packet": self._default_packet_cfg(),
         }
 
     @staticmethod
@@ -369,6 +549,46 @@ class HeterPyramidCollabHvpCbea(HeterPyramidCollab):
         normalized["alpha_init"] = float(normalized.get("alpha_init", 0.05))
         normalized["alpha_max"] = float(normalized.get("alpha_max", 0.3))
         normalized["learnable"] = bool(normalized.get("learnable", True))
+        return normalized
+
+    @staticmethod
+    def _default_packet_cfg():
+        return {
+            "enabled": False,
+            "mode": "packet_one_round",
+            "topk": 50,
+            "packet_dim": 16,
+            "descriptor_dim": 8,
+            "quantize": "fp16",
+            "send_uncertainty": True,
+            "send_agent_quality": True,
+            "send_timestamp": True,
+            "bandwidth_budget_kb": 8,
+            "deadline_ms": 100,
+            "detach_packet": False,
+            "debug": False,
+        }
+
+    @classmethod
+    def _normalize_packet_cfg(cls, cfg):
+        normalized = cls._default_packet_cfg()
+        if isinstance(cfg, bool):
+            normalized["enabled"] = cfg
+        elif isinstance(cfg, dict):
+            normalized.update(cfg)
+        normalized["enabled"] = bool(normalized.get("enabled", False))
+        normalized["mode"] = str(normalized.get("mode", "packet_one_round"))
+        normalized["topk"] = int(normalized.get("topk", 50))
+        normalized["packet_dim"] = int(normalized.get("packet_dim", 16))
+        normalized["descriptor_dim"] = int(normalized.get("descriptor_dim", 8))
+        normalized["quantize"] = str(normalized.get("quantize", "fp16"))
+        normalized["send_uncertainty"] = bool(normalized.get("send_uncertainty", True))
+        normalized["send_agent_quality"] = bool(normalized.get("send_agent_quality", True))
+        normalized["send_timestamp"] = bool(normalized.get("send_timestamp", True))
+        normalized["bandwidth_budget_kb"] = float(normalized.get("bandwidth_budget_kb", 8))
+        normalized["deadline_ms"] = float(normalized.get("deadline_ms", 100))
+        normalized["detach_packet"] = bool(normalized.get("detach_packet", False))
+        normalized["debug"] = bool(normalized.get("debug", False))
         return normalized
 
     def _freeze_non_hvp_parameters(self):

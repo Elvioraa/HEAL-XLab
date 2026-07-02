@@ -473,6 +473,79 @@ Base hash: `180f553`
 - Run an `enabled=true` untrained sanity final_infer to verify identity-start behavior.
 - Run a short `train_only_hvp` fine-tune to test whether the safer residual update improves AP@0.7.
 
+## HEAL-XLab-v3.0 packet mode
+
+Base hash: `25509b7`
+
+### Goal
+
+- Add an optional HVP-CBEA packet communication path for realistic cross-vendor collaboration.
+- Deployment assumption: no raw sensor sharing, no dense intermediate BEV feature sharing, and no vendor-private model sharing.
+- Collaborators send standardized hypothesis/evidence packets; ego aggregates packet evidence and applies residual refinement.
+
+### Added Files
+
+- `opencood/models/sub_modules/hvp_cbea_packet.py`
+  - Adds `HypothesisEvidencePacketizer`.
+  - Adds `PacketCompressor`.
+  - Adds `PacketAggregator`.
+  - Adds `PacketCommunicationMeter`.
+- `opencood/tools/check_hvp_cbea_packet_smoke.py`
+  - Covers packetizer shape, fp16 communication stats, aggregation shape/finite checks, backward gradients, and empty-packet behavior.
+- `docs/HVP_CBEA_PACKET_V3_PLAN.md`
+  - Documents packet-mode goals, config, communication boundary, modules, safety, and validation.
+
+### Modified Files
+
+- `opencood/models/heter_pyramid_collab_hvp_cbea.py`
+  - Adds `model.args.hvp_cbea.packet` config with default `enabled=false`.
+  - Instantiates packet modules only when `packet.enabled=true`.
+  - Adds packet path before the v2.5 feature HVP path.
+  - Falls back to the v2.5 feature HVP path when packet inputs are unavailable and `fallback_on_error=true`.
+  - Extends train-only HVP prefixes to include packet modules.
+- `opencood/models/sub_modules/bayesian_hypothesis_fusion.py`
+  - Exposes `apply_residual_delta()` so packet mode reuses the v2.5 residual gate.
+- `docs/HVP_CBEA_CONFIG_SCHEMA.md`
+- `docs/HVP_CBEA_V2_PLAN.md`
+- `docs/CHANGE_RECORD_XLAB.md`
+
+### Config
+
+Default packet config:
+
+```yaml
+packet:
+  enabled: false
+  mode: packet_one_round
+  topk: 50
+  packet_dim: 16
+  descriptor_dim: 8
+  quantize: fp16
+  send_uncertainty: true
+  send_agent_quality: true
+  send_timestamp: true
+  bandwidth_budget_kb: 8
+  deadline_ms: 100
+  detach_packet: false
+  debug: false
+```
+
+### Safety
+
+- `enabled=false` still follows the official HEAL path.
+- `packet.enabled=false` keeps the v2.5 HVP-CBEA feature path unchanged and does not instantiate packet modules.
+- Official `heter_pyramid_collab.py` is not modified.
+- v1 HBEC is not modified.
+- No logs config is added.
+- `train_only_hvp=true` still freezes inherited HEAL parameters and non-HVP BN buffers; packet modules are HVP-trainable when enabled.
+- Packet aggregator receives packet tensors, not dense collaborator BEV features.
+
+### Follow-up
+
+- Run `packet.enabled=true` untrained sanity final_infer.
+- Run short `train_only_hvp` packet fine-tune with packet debug enabled.
+- Replace pseudo top-K feature boxes with real detector box decoding at the packetizer boundary.
+
 ## HEAL-XLab-v1.1-logfmt
 
 Change:
