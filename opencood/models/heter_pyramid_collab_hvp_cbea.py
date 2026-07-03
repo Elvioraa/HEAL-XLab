@@ -92,6 +92,10 @@ from opencood.models.sub_modules.hvp_cbea_packet import (
     PacketCommunicationMeter,
     PacketCompressor,
 )
+from opencood.loss.hvp_cbea_aux_loss import (
+    default_hvp_aux_loss_cfg,
+    normalize_hvp_aux_loss_cfg,
+)
 from opencood.utils.transformation_utils import normalize_pairwise_tfm
 
 
@@ -122,9 +126,13 @@ class HeterPyramidCollabHvpCbea(HeterPyramidCollab):
         self.hvp_cbea_cfg["packet"] = self._normalize_packet_cfg(
             self.hvp_cbea_cfg.get("packet")
         )
+        self.hvp_cbea_cfg["aux_loss"] = normalize_hvp_aux_loss_cfg(
+            self.hvp_cbea_cfg.get("aux_loss")
+        )
         self.hvp_cbea_enabled = bool(self.hvp_cbea_cfg.get("enabled", False))
         self.hvp_train_only = bool(self.hvp_cbea_cfg.get("train_only_hvp", False))
         self.hvp_packet_enabled = bool(self.hvp_cbea_cfg["packet"].get("enabled", False))
+        self.hvp_aux_loss_enabled = bool(self.hvp_cbea_cfg["aux_loss"].get("enabled", False))
         self.hvp_trainable_summary = None
         if self.hvp_cbea_enabled:
             in_channels = int(self.hvp_cbea_cfg.get("in_channels", args.get("in_head", 256)))
@@ -271,7 +279,7 @@ class HeterPyramidCollabHvpCbea(HeterPyramidCollab):
         if self.shrink_flag:
             fused_feature = self.shrink_conv(fused_feature)
 
-        fused_feature, hvp_debug, hvp_loss = self._apply_hvp_cbea(
+        fused_feature, hvp_debug, hvp_loss, hvp_aux = self._apply_hvp_cbea(
             fused_feature=fused_feature,
             heter_feature_2d=heter_feature_2d,
             record_len=record_len,
@@ -289,6 +297,8 @@ class HeterPyramidCollabHvpCbea(HeterPyramidCollab):
             output_dict.update({'hvp_cbea_debug': hvp_debug})
             if hvp_loss is not None:
                 output_dict['hvp_cbea_loss'] = hvp_loss
+            if hvp_aux is not None:
+                output_dict['hvp_cbea_aux'] = hvp_aux
         return output_dict
 
     def _apply_hvp_cbea(self, fused_feature, heter_feature_2d, record_len):
@@ -312,9 +322,10 @@ class HeterPyramidCollabHvpCbea(HeterPyramidCollab):
         if self.hvp_packet_enabled:
             debug.update(self._packet_debug_defaults())
         if self.hvp_cbea_enabled:
+            self.bayesian_hypothesis_fusion.clear_aux_tensors()
             debug.update(self.bayesian_hypothesis_fusion.get_residual_debug())
         if not self.hvp_cbea_enabled:
-            return fused_feature, debug, None
+            return fused_feature, debug, None, None
 
         try:
             ego_hyps, hmap, reg = self.hypothesis_encoder(fused_feature)
@@ -341,7 +352,7 @@ class HeterPyramidCollabHvpCbea(HeterPyramidCollab):
                     debug["feature_shape_after"] = list(fused_feature_out.shape)
                     hvp_loss = self._compute_hvp_loss(hmap, reg, None, updated_hyps)
                     debug["hvp_loss"] = float(hvp_loss.detach().cpu()) if torch.is_tensor(hvp_loss) else 0.0
-                    return fused_feature_out, debug, hvp_loss
+                    return fused_feature_out, debug, hvp_loss, self._make_hvp_aux_payload(debug, fused_feature_out)
                 if not self.hvp_cbea_cfg.get("fallback_on_error", True):
                     raise RuntimeError(packet_debug.get("packet_fallback_reason", "packet_mode_failed"))
 
@@ -368,11 +379,20 @@ class HeterPyramidCollabHvpCbea(HeterPyramidCollab):
             debug["feature_shape_after"] = list(fused_feature_out.shape)
             hvp_loss = self._compute_hvp_loss(hmap, reg, verif_logits, updated_hyps)
             debug["hvp_loss"] = float(hvp_loss.detach().cpu()) if torch.is_tensor(hvp_loss) else 0.0
-            return fused_feature_out, debug, hvp_loss
+            return fused_feature_out, debug, hvp_loss, self._make_hvp_aux_payload(debug, fused_feature_out)
         except Exception as exc:
             if self.hvp_cbea_cfg.get("fallback_on_error", True):
                 debug["fallback_reason"] = "exception:%s" % type(exc).__name__
-                return fused_feature, debug, fused_feature.sum() * 0.0
+                return (
+                    fused_feature,
+                    debug,
+                    fused_feature.sum() * 0.0,
+                    self._make_hvp_aux_payload(
+                        debug,
+                        ref_tensor=fused_feature,
+                        fallback_reason=debug["fallback_reason"],
+                    ),
+                )
             raise
 
     def _apply_hvp_packet_mode(self, fused_feature, heter_feature_2d, record_len,
@@ -490,6 +510,24 @@ class HeterPyramidCollabHvpCbea(HeterPyramidCollab):
             "budget_saturated": False,
         }
 
+    def _make_hvp_aux_payload(self, debug, ref_tensor=None, fallback_reason=""):
+        if not self.hvp_aux_loss_enabled:
+            return None
+        aux_tensors = self.bayesian_hypothesis_fusion.get_aux_tensors()
+        aux_debug = dict(debug)
+        if fallback_reason:
+            aux_debug["hvp_aux_fallback_reason"] = fallback_reason
+        payload = {
+            "enabled": True,
+            "config": self.hvp_cbea_cfg["aux_loss"],
+            "fallback_on_error": bool(self.hvp_cbea_cfg.get("fallback_on_error", True)),
+            "debug": aux_debug,
+            **aux_tensors,
+        }
+        if torch.is_tensor(ref_tensor):
+            payload["loss_ref_tensor"] = ref_tensor.sum() * 0.0
+        return payload
+
     def _collect_collaborator_features(self, heter_feature_2d, record_len):
         if heter_feature_2d is None or heter_feature_2d.ndim != 4:
             return None
@@ -550,6 +588,7 @@ class HeterPyramidCollabHvpCbea(HeterPyramidCollab):
             "train_only_hvp": False,
             "residual_gate": self._default_residual_gate_cfg(),
             "packet": self._default_packet_cfg(),
+            "aux_loss": default_hvp_aux_loss_cfg(),
         }
 
     @staticmethod

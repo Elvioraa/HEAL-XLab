@@ -520,6 +520,66 @@ residual_gate:
 - v1 HBEC is not modified.
 - No logs config is added.
 
+## HEAL-XLab-v2.7-a auxiliary loss plumbing
+
+Base hash: `7bc0127`
+
+### Motivation
+
+- Current training logs can show `HVP-CBEA Loss: 0.0000`.
+- The existing `_compute_hvp_loss()` path only returns `tensor.sum() * 0.0` terms. This keeps HVP-CBEA tensors attached to the graph safely, but it does not provide an auxiliary optimization signal.
+- v2.7-a adds the plumbing for configurable auxiliary HVP-CBEA losses while keeping the default behavior off.
+
+### Added Files
+
+- `opencood/loss/hvp_cbea_aux_loss.py`
+  - Adds default and normalized `aux_loss` config helpers.
+  - Adds `compute_hvp_auxiliary_loss()`.
+  - Supports residual regularization, alpha regularization, and a placeholder feature-delta consistency term.
+
+### Modified Files
+
+- `opencood/models/sub_modules/bayesian_hypothesis_fusion.py`
+  - Records `delta_feature`, `hvp_residual`, `alpha`, and `effective_alpha` after residual fusion.
+- `opencood/models/heter_pyramid_collab_hvp_cbea.py`
+  - Adds default-off `model.args.hvp_cbea.aux_loss`.
+  - Emits `output_dict['hvp_cbea_aux']` only when `aux_loss.enabled=true`.
+- `opencood/loss/point_pillar_loss.py`
+  - Adds enabled auxiliary HVP-CBEA terms into the standard detection loss.
+  - Reports `hvp_residual_reg_loss`, `hvp_alpha_reg_loss`, `hvp_refinement_consistency_loss`, and `hvp_aux_total_loss`.
+- `opencood/tools/check_hvp_cbea_smoke.py`
+  - Adds an auxiliary-loss CPU smoke with backward gradient checks.
+
+### Config
+
+```yaml
+aux_loss:
+  enabled: false
+  debug: false
+  residual_reg:
+    enabled: false
+    weight: 0.001
+    type: l1
+  alpha_reg:
+    enabled: false
+    weight: 0.001
+    target: 0.05
+  refinement_consistency:
+    enabled: false
+    weight: 0.05
+    mode: feature_delta_l1
+```
+
+### Safety
+
+- `aux_loss.enabled=false` preserves the v2.6 path.
+- `enabled=false` still follows the official HEAL path.
+- No new trainable parameters or checkpoint keys are added.
+- v2.7-a `refinement_consistency` is a placeholder L1 term on `delta_feature`; v2.7-b should replace it with GT-guided refinement supervision.
+- Official `heter_pyramid_collab.py` is not modified.
+- v1 HBEC is not modified.
+- No logs config is added.
+
 ## HEAL-XLab-v3.0 packet mode
 
 Base hash: `25509b7`

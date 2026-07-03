@@ -25,6 +25,21 @@ model:
       loss_weight_fusion: 0.2
       fallback_on_error: true
       train_only_hvp: false
+      aux_loss:
+        enabled: false
+        debug: false
+        residual_reg:
+          enabled: false
+          weight: 0.001
+          type: l1
+        alpha_reg:
+          enabled: false
+          weight: 0.001
+          target: 0.05
+        refinement_consistency:
+          enabled: false
+          weight: 0.05
+          mode: feature_delta_l1
       residual_gate:
         enabled: true
         alpha_init: 0.05
@@ -160,6 +175,36 @@ fused_feature_out = fused_feature + effective_alpha * delta_feature
 ```
 
 `record_len <= 1` uses `no_collab_scale` and suppresses ego-only residual by default. `record_len >= min_cav` uses `collab_scale` and preserves the v2.5 residual strength by default. With `collaboration_aware.enabled: false`, `collaboration_scale=1.0`, so the v2.5 path is unchanged.
+
+## v2.7-a Auxiliary Loss Plumbing
+
+Auxiliary loss is disabled by default. If the `aux_loss` field is omitted, the effective default is:
+
+```yaml
+aux_loss:
+  enabled: false
+  debug: false
+  residual_reg:
+    enabled: false
+    weight: 0.001
+    type: l1
+  alpha_reg:
+    enabled: false
+    weight: 0.001
+    target: 0.05
+  refinement_consistency:
+    enabled: false
+    weight: 0.05
+    mode: feature_delta_l1
+```
+
+When `aux_loss.enabled: false`, HVP-CBEA keeps the v2.6 behavior. When enabled, the standard detection loss can add optional HVP-CBEA auxiliary terms:
+
+- `residual_reg`: regularizes `effective_alpha * delta_feature`.
+- `alpha_reg`: regularizes the bounded residual `alpha` toward a target.
+- `refinement_consistency`: currently a feature-delta L1 placeholder on `delta_feature`.
+
+The current v2.7-a consistency term is not GT-guided; v2.7-b can replace it with detection-target-aware refinement supervision. No new trainable parameters or checkpoint keys are introduced.
 
 ## v3.0 Packet Mode
 

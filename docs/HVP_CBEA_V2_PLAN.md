@@ -27,6 +27,7 @@ HVP-CBEA is a model-forward-level experimental direction. It is independent of v
 - v2.4 keeps inherited HEAL BatchNorm buffers frozen in `train_only_hvp` mode while leaving HVP-CBEA modules trainable.
 - v2.5 wraps the HVP-CBEA feature update in a bounded residual gate for identity-start safety.
 - v2.6 optionally suppresses the residual gate in ego-only scenes with no collaborator evidence.
+- v2.7-a adds default-off auxiliary loss plumbing for residual, alpha, and placeholder refinement consistency terms.
 - v3.0 adds an optional packet communication path for low-bandwidth cross-vendor experiments.
 - GT-dependent auxiliary losses are defensive and return zero when GT format is not available.
 - No inference-time GT is used.
@@ -126,6 +127,33 @@ Expected ablation:
 - `use_cav2/use_cav3/use_cav4`: keep `collaboration_scale=1.0` and preserve v2.5 residual behavior.
 
 This is intended for inference-only ablation with a v2.5 checkpoint: turn on `collaboration_aware.enabled=true` in config, run final_infer, and compare whether `use_cav1` recovers while multi-CAV gains remain.
+
+## v2.7-a Auxiliary Loss Plumbing
+
+Current training logs can print `HVP-CBEA Loss: 0.0000` because the original HVP-CBEA loss hook is a gradient-safe zero placeholder. v2.7-a keeps that placeholder compatible and adds a config-gated auxiliary loss path:
+
+```yaml
+aux_loss:
+  enabled: false
+  residual_reg:
+    enabled: false
+    weight: 0.001
+    type: l1
+  alpha_reg:
+    enabled: false
+    weight: 0.001
+    target: 0.05
+  refinement_consistency:
+    enabled: false
+    weight: 0.05
+    mode: feature_delta_l1
+```
+
+When enabled, `BayesianHypothesisFusion` exposes `delta_feature`, `hvp_residual`, `alpha`, and `effective_alpha` through `output_dict['hvp_cbea_aux']`. The standard PointPillar loss adds enabled auxiliary terms to the detection loss and reports `hvp_residual_reg_loss`, `hvp_alpha_reg_loss`, `hvp_refinement_consistency_loss`, and `hvp_aux_total_loss`.
+
+The v2.7-a `refinement_consistency` term is deliberately simple: it regularizes `delta_feature` with L1 as a placeholder. v2.7-b should replace or extend it with GT-guided refinement supervision once the target format and matching contract are finalized.
+
+Default behavior is unchanged: if `aux_loss.enabled=false` or the field is omitted, v2.6 residual and collaboration-aware semantics are preserved and no new checkpoint parameters are required.
 
 ## v3.0 Packet Mode
 

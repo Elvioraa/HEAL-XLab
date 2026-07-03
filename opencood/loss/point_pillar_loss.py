@@ -9,6 +9,7 @@ import torch.nn.functional as F
 import numpy as np
 from opencood.utils.common_utils import limit_period
 from opencood.data_utils.post_processor.voxel_postprocessor import VoxelPostprocessor
+from opencood.loss.hvp_cbea_aux_loss import compute_hvp_auxiliary_loss
 from icecream import ic
 
 class PointPillarLoss(nn.Module):
@@ -114,11 +115,28 @@ class PointPillarLoss(nn.Module):
             self.loss_dict.update({'iou_loss': iou_loss.item()})
 
         total_loss += reg_loss + cls_loss
-        if suffix == "" and "hvp_cbea_loss" in output_dict:
-            hvp_cbea_loss = output_dict["hvp_cbea_loss"]
-            if torch.is_tensor(hvp_cbea_loss):
-                total_loss += hvp_cbea_loss
-                self.loss_dict.update({'hvp_cbea_loss': hvp_cbea_loss.item()})
+        if suffix == "":
+            hvp_cbea_loss_total = None
+            if "hvp_cbea_loss" in output_dict:
+                hvp_cbea_loss = output_dict["hvp_cbea_loss"]
+                if torch.is_tensor(hvp_cbea_loss):
+                    total_loss += hvp_cbea_loss
+                    hvp_cbea_loss_total = hvp_cbea_loss
+            if "hvp_cbea_aux" in output_dict:
+                aux_payload = output_dict["hvp_cbea_aux"]
+                aux_loss, aux_stats = compute_hvp_auxiliary_loss(
+                    aux_payload,
+                    fallback_on_error=bool(aux_payload.get("fallback_on_error", True)),
+                )
+                if torch.is_tensor(aux_loss):
+                    total_loss += aux_loss
+                    hvp_cbea_loss_total = (
+                        aux_loss if hvp_cbea_loss_total is None
+                        else hvp_cbea_loss_total + aux_loss
+                    )
+                self.loss_dict.update(aux_stats)
+            if torch.is_tensor(hvp_cbea_loss_total):
+                self.loss_dict.update({'hvp_cbea_loss': hvp_cbea_loss_total.item()})
 
         self.loss_dict.update({'total_loss': total_loss.item(),
                                'reg_loss': reg_loss.item(),

@@ -47,14 +47,17 @@ class BayesianHypothesisFusion(nn.Module):
             nn.Sigmoid(),
         )
         self.last_residual_debug = self._make_residual_debug()
+        self.last_aux_tensors = {}
 
     def forward(self, ego_hyps, verif_logits, refine_delta, novel_hyps,
                 ego_bev_feat, collaboration_scale=None, collaboration_debug=None):
         if ego_bev_feat is None or ego_bev_feat.ndim != 4:
             self.last_residual_debug = self._make_residual_debug(fallback_reason="invalid_ego_bev_feat")
+            self.last_aux_tensors = {}
             return ego_bev_feat, ego_hyps
         if ego_hyps is None or ego_hyps.ndim != 3 or ego_hyps.shape[1] == 0:
             self.last_residual_debug = self._make_residual_debug(fallback_reason="no_ego_hypotheses")
+            self.last_aux_tensors = {}
             return ego_bev_feat, ego_hyps
         try:
             updated_hyps = self._update_hypotheses(ego_hyps, verif_logits, refine_delta)
@@ -72,6 +75,7 @@ class BayesianHypothesisFusion(nn.Module):
             return fused, updated_hyps
         except Exception:
             self.last_residual_debug = self._make_residual_debug(fallback_reason="exception")
+            self.last_aux_tensors = {}
             return ego_bev_feat, ego_hyps
 
     def compute_loss(self, *args, **kwargs):
@@ -117,6 +121,12 @@ class BayesianHypothesisFusion(nn.Module):
     def get_residual_debug(self):
         return dict(self.last_residual_debug)
 
+    def get_aux_tensors(self):
+        return dict(self.last_aux_tensors)
+
+    def clear_aux_tensors(self):
+        self.last_aux_tensors = {}
+
     def apply_residual_delta(self, ego_bev_feat, delta_feature,
                              collaboration_scale=None, collaboration_debug=None):
         alpha = self._residual_alpha().to(device=ego_bev_feat.device, dtype=ego_bev_feat.dtype)
@@ -126,10 +136,18 @@ class BayesianHypothesisFusion(nn.Module):
         )
         effective_alpha = alpha * collaboration_scale
         if self.residual_gate_enabled:
-            fused = ego_bev_feat + effective_alpha * delta_feature
+            hvp_residual = effective_alpha * delta_feature
+            fused = ego_bev_feat + hvp_residual
         else:
+            hvp_residual = delta_feature
             fused = ego_bev_feat + delta_feature
             effective_alpha = alpha
+        self.last_aux_tensors = {
+            "delta_feature": delta_feature,
+            "hvp_residual": hvp_residual,
+            "alpha": alpha,
+            "effective_alpha": effective_alpha,
+        }
         self.last_residual_debug = self._make_residual_debug(
             alpha,
             delta_feature,

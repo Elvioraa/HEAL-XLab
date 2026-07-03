@@ -12,6 +12,7 @@ if REPO_ROOT not in sys.path:
 from opencood.models.sub_modules.hypothesis_encoder import HypothesisEncoder
 from opencood.models.sub_modules.hypothesis_verifier import HypothesisVerifier
 from opencood.models.sub_modules.bayesian_hypothesis_fusion import BayesianHypothesisFusion
+from opencood.loss.hvp_cbea_aux_loss import compute_hvp_auxiliary_loss
 
 
 def main():
@@ -64,11 +65,13 @@ def main():
     assert fused_empty.shape == bev.shape
     assert updated_empty.shape == empty_hyps.shape
     check_collaboration_aware_gate()
+    check_hvp_auxiliary_loss()
 
     print("HVP-CBEA smoke OK")
     print("HVP-CBEA backward OK")
     print("HVP-CBEA residual gate OK")
     print("HVP-CBEA collaboration-aware gate OK")
+    print("HVP-CBEA auxiliary loss OK")
 
 
 def check_collaboration_aware_gate():
@@ -158,6 +161,56 @@ def check_collaboration_aware_gate():
     )
     alpha = fusion_disabled._residual_alpha().to(dtype=base.dtype)
     assert torch.allclose(disabled_out, base + alpha * delta)
+
+
+def check_hvp_auxiliary_loss():
+    delta_feature = torch.randn(1, 64, 32, 32, requires_grad=True)
+    alpha = torch.tensor(0.05, requires_grad=True)
+    effective_alpha = alpha.view(1, 1, 1, 1)
+    hvp_residual = effective_alpha * delta_feature
+    aux_dict = {
+        "enabled": True,
+        "delta_feature": delta_feature,
+        "hvp_residual": hvp_residual,
+        "alpha": alpha,
+        "effective_alpha": effective_alpha,
+    }
+    aux_cfg = {
+        "enabled": True,
+        "residual_reg": {
+            "enabled": True,
+            "weight": 0.001,
+            "type": "l1",
+        },
+        "alpha_reg": {
+            "enabled": True,
+            "weight": 0.001,
+            "target": 0.02,
+        },
+        "refinement_consistency": {
+            "enabled": True,
+            "weight": 0.05,
+            "mode": "feature_delta_l1",
+        },
+    }
+    aux_loss, aux_stats = compute_hvp_auxiliary_loss(aux_dict, aux_cfg)
+    assert torch.is_tensor(aux_loss)
+    assert torch.isfinite(aux_loss).all()
+    assert aux_loss.detach().item() > 0.0
+    for key in (
+        "hvp_residual_reg_loss",
+        "hvp_alpha_reg_loss",
+        "hvp_refinement_consistency_loss",
+        "hvp_aux_total_loss",
+    ):
+        assert torch.isfinite(torch.tensor(aux_stats[key]))
+    aux_loss.backward()
+    assert delta_feature.grad is not None
+    assert alpha.grad is not None
+    assert torch.isfinite(delta_feature.grad).all()
+    assert torch.isfinite(alpha.grad).all()
+    assert delta_feature.grad.detach().abs().sum() > 0
+    assert alpha.grad.detach().abs().sum() > 0
 
 
 if __name__ == "__main__":
