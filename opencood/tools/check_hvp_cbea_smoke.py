@@ -66,12 +66,14 @@ def main():
     assert updated_empty.shape == empty_hyps.shape
     check_collaboration_aware_gate()
     check_hvp_auxiliary_loss()
+    check_hvp_gt_guided_auxiliary_loss()
 
     print("HVP-CBEA smoke OK")
     print("HVP-CBEA backward OK")
     print("HVP-CBEA residual gate OK")
     print("HVP-CBEA collaboration-aware gate OK")
     print("HVP-CBEA auxiliary loss OK")
+    print("HVP-CBEA GT-guided auxiliary loss OK")
 
 
 def check_collaboration_aware_gate():
@@ -211,6 +213,70 @@ def check_hvp_auxiliary_loss():
     assert torch.isfinite(alpha.grad).all()
     assert delta_feature.grad.detach().abs().sum() > 0
     assert alpha.grad.detach().abs().sum() > 0
+
+
+def check_hvp_gt_guided_auxiliary_loss():
+    hmap = torch.rand(1, 1, 32, 32, requires_grad=True)
+    delta_feature = torch.randn(1, 64, 32, 32, requires_grad=True)
+    alpha = torch.tensor(0.05, requires_grad=True)
+    effective_alpha = alpha.view(1, 1, 1, 1)
+    hvp_residual = effective_alpha * delta_feature
+    pos_equal_one = torch.zeros(1, 32, 32, 2)
+    pos_equal_one[0, 8, 9, 0] = 1.0
+    pos_equal_one[0, 16, 17, 1] = 1.0
+    pos_equal_one[0, 24, 20, 0] = 1.0
+    aux_dict = {
+        "enabled": True,
+        "hypothesis_hmap": hmap,
+        "hmap": hmap,
+        "delta_feature": delta_feature,
+        "hvp_residual": hvp_residual,
+        "alpha": alpha,
+        "effective_alpha": effective_alpha,
+    }
+    target_dict = {
+        "pos_equal_one": pos_equal_one,
+    }
+    aux_cfg = {
+        "enabled": True,
+        "gt_guided": {
+            "enabled": True,
+            "hypothesis_heatmap": {
+                "enabled": True,
+                "weight": 0.05,
+                "source": "anchor_pos",
+                "loss": "bce",
+                "pos_weight": 2.0,
+            },
+            "residual_focus": {
+                "enabled": True,
+                "weight": 0.01,
+                "source": "anchor_pos",
+                "bg_weight": 1.0,
+                "fg_weight": 0.25,
+            },
+        },
+    }
+    aux_loss, aux_stats = compute_hvp_auxiliary_loss(
+        aux_dict,
+        aux_cfg,
+        target_dict=target_dict,
+    )
+    assert torch.is_tensor(aux_loss)
+    assert torch.isfinite(aux_loss).all()
+    assert aux_loss.detach().item() > 0.0
+    assert torch.isfinite(torch.tensor(aux_stats["hvp_gt_hypothesis_heatmap_loss"]))
+    assert torch.isfinite(torch.tensor(aux_stats["hvp_gt_residual_focus_loss"]))
+    assert aux_stats["hvp_gt_hypothesis_heatmap_loss"] > 0.0
+    assert aux_stats["hvp_gt_residual_focus_loss"] > 0.0
+    assert aux_stats["hvp_gt_target_source"].startswith("anchor_pos")
+    aux_loss.backward()
+    assert hmap.grad is not None
+    assert delta_feature.grad is not None
+    assert torch.isfinite(hmap.grad).all()
+    assert torch.isfinite(delta_feature.grad).all()
+    assert hmap.grad.detach().abs().sum() > 0
+    assert delta_feature.grad.detach().abs().sum() > 0
 
 
 if __name__ == "__main__":

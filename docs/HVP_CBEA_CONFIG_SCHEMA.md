@@ -40,6 +40,26 @@ model:
           enabled: false
           weight: 0.05
           mode: feature_delta_l1
+        gt_guided:
+          enabled: false
+          debug: false
+          hypothesis_heatmap:
+            enabled: false
+            weight: 0.05
+            source: anchor_pos
+            loss: bce
+            pos_weight: 2.0
+          residual_focus:
+            enabled: false
+            weight: 0.01
+            source: anchor_pos
+            bg_weight: 1.0
+            fg_weight: 0.25
+          residual_fg_boost:
+            enabled: false
+            weight: 0.005
+            source: anchor_pos
+            target: 0.0
       residual_gate:
         enabled: true
         alpha_init: 0.05
@@ -196,6 +216,26 @@ aux_loss:
     enabled: false
     weight: 0.05
     mode: feature_delta_l1
+  gt_guided:
+    enabled: false
+    debug: false
+    hypothesis_heatmap:
+      enabled: false
+      weight: 0.05
+      source: anchor_pos
+      loss: bce
+      pos_weight: 2.0
+    residual_focus:
+      enabled: false
+      weight: 0.01
+      source: anchor_pos
+      bg_weight: 1.0
+      fg_weight: 0.25
+    residual_fg_boost:
+      enabled: false
+      weight: 0.005
+      source: anchor_pos
+      target: 0.0
 ```
 
 When `aux_loss.enabled: false`, HVP-CBEA keeps the v2.6 behavior. When enabled, the standard detection loss can add optional HVP-CBEA auxiliary terms:
@@ -205,6 +245,24 @@ When `aux_loss.enabled: false`, HVP-CBEA keeps the v2.6 behavior. When enabled, 
 - `refinement_consistency`: currently a feature-delta L1 placeholder on `delta_feature`.
 
 The current v2.7-a consistency term is not GT-guided; v2.7-b can replace it with detection-target-aware refinement supervision. No new trainable parameters or checkpoint keys are introduced.
+
+## v2.7-b GT-guided Auxiliary Loss
+
+`gt_guided` is also disabled by default. If the field is omitted, it is equivalent to:
+
+```yaml
+aux_loss:
+  gt_guided:
+    enabled: false
+```
+
+When `aux_loss.enabled: true` and `gt_guided.enabled: true`, HVP-CBEA can use anchor-positive supervision from `target_dict["pos_equal_one"]`:
+
+- `hypothesis_heatmap`: guides `hypothesis_hmap` with anchor-positive BCE.
+- `residual_focus`: regularizes `hvp_residual` more strongly in background than foreground.
+- `residual_fg_boost`: currently a conservative foreground residual L1-to-target placeholder.
+
+The positive map parser supports `[B,H,W,A]`, `[B,A,H,W]`, `[B,1,H,W]`, and compatible flat anchor layouts. The map is resized to the HVP tensor resolution with nearest-neighbor interpolation. With `gt_guided.enabled: false`, v2.7-a behavior is unchanged.
 
 ## v3.0 Packet Mode
 

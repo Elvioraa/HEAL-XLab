@@ -580,6 +580,68 @@ aux_loss:
 - v1 HBEC is not modified.
 - No logs config is added.
 
+## HEAL-XLab-v2.7-b GT-guided auxiliary loss
+
+Base hash: `406cfef`
+
+### Motivation
+
+- v2.7-a made `HVP-CBEA Loss` non-zero through safe residual, alpha, and feature-delta regularization.
+- Those terms are useful plumbing and safety regularizers, but they do not explicitly guide the hypothesis heatmap or where residual updates should occur.
+- v2.7-b adds optional GT/anchor-guided HVP auxiliary supervision to focus residual changes on target regions and reduce background perturbation.
+
+### Implementation
+
+- `opencood/loss/hvp_cbea_aux_loss.py`
+  - Adds default-off `aux_loss.gt_guided`.
+  - Parses `target_dict["pos_equal_one"]` as the anchor-positive map.
+  - Supports `[B,H,W,A]`, `[B,A,H,W]`, `[B,1,H,W]`, and compatible flat anchor layouts.
+  - Adds `hvp_gt_hypothesis_heatmap_loss`, `hvp_gt_residual_focus_loss`, and `hvp_gt_residual_fg_boost_loss`.
+- `opencood/models/heter_pyramid_collab_hvp_cbea.py`
+  - Adds `hypothesis_hmap` / `hmap` and `hypothesis_reg` / `reg` into `output_dict['hvp_cbea_aux']` when auxiliary loss is enabled.
+- `opencood/loss/point_pillar_loss.py`
+  - Passes the existing training `target_dict` into `compute_hvp_auxiliary_loss()`.
+- `opencood/tools/check_hvp_cbea_smoke.py`
+  - Adds GT-guided auxiliary loss smoke coverage and backward checks.
+
+### Config
+
+```yaml
+aux_loss:
+  enabled: false
+  gt_guided:
+    enabled: false
+    debug: false
+    hypothesis_heatmap:
+      enabled: false
+      weight: 0.05
+      source: anchor_pos
+      loss: bce
+      pos_weight: 2.0
+    residual_focus:
+      enabled: false
+      weight: 0.01
+      source: anchor_pos
+      bg_weight: 1.0
+      fg_weight: 0.25
+    residual_fg_boost:
+      enabled: false
+      weight: 0.005
+      source: anchor_pos
+      target: 0.0
+```
+
+### Safety
+
+- `aux_loss.enabled=false` preserves the old path.
+- `gt_guided.enabled=false` preserves v2.7-a behavior.
+- `enabled=false` still follows the official HEAL path.
+- No new trainable parameters or checkpoint keys are added.
+- The foreground boost term remains a conservative L1-to-target placeholder; stronger hypothesis-level box refinement is left for future work.
+- Official `heter_pyramid_collab.py` is not modified.
+- v1 HBEC is not modified.
+- No logs config is added.
+
 ## HEAL-XLab-v3.0 packet mode
 
 Base hash: `25509b7`

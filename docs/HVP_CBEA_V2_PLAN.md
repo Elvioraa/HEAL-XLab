@@ -28,6 +28,7 @@ HVP-CBEA is a model-forward-level experimental direction. It is independent of v
 - v2.5 wraps the HVP-CBEA feature update in a bounded residual gate for identity-start safety.
 - v2.6 optionally suppresses the residual gate in ego-only scenes with no collaborator evidence.
 - v2.7-a adds default-off auxiliary loss plumbing for residual, alpha, and placeholder refinement consistency terms.
+- v2.7-b adds default-off GT/anchor-guided supervision for hypothesis heatmaps and residual focus.
 - v3.0 adds an optional packet communication path for low-bandwidth cross-vendor experiments.
 - GT-dependent auxiliary losses are defensive and return zero when GT format is not available.
 - No inference-time GT is used.
@@ -154,6 +155,44 @@ When enabled, `BayesianHypothesisFusion` exposes `delta_feature`, `hvp_residual`
 The v2.7-a `refinement_consistency` term is deliberately simple: it regularizes `delta_feature` with L1 as a placeholder. v2.7-b should replace or extend it with GT-guided refinement supervision once the target format and matching contract are finalized.
 
 Default behavior is unchanged: if `aux_loss.enabled=false` or the field is omitted, v2.6 residual and collaboration-aware semantics are preserved and no new checkpoint parameters are required.
+
+## v2.7-b GT-guided Auxiliary Loss
+
+v2.7-b turns the v2.7-a auxiliary plumbing into a target-aware supervision path while keeping it fully config-gated:
+
+```yaml
+aux_loss:
+  enabled: false
+  gt_guided:
+    enabled: false
+    hypothesis_heatmap:
+      enabled: false
+      weight: 0.05
+      source: anchor_pos
+      loss: bce
+      pos_weight: 2.0
+    residual_focus:
+      enabled: false
+      weight: 0.01
+      source: anchor_pos
+      bg_weight: 1.0
+      fg_weight: 0.25
+    residual_fg_boost:
+      enabled: false
+      weight: 0.005
+      source: anchor_pos
+      target: 0.0
+```
+
+The loss uses `target_dict["pos_equal_one"]` as an anchor-positive map. It supports common layouts such as `[B,H,W,A]`, `[B,A,H,W]`, and `[B,1,H,W]`, then resizes the foreground map to the HVP heatmap or residual spatial size.
+
+The new terms are:
+
+- `hvp_gt_hypothesis_heatmap_loss`: BCE supervision for `hypothesis_hmap`.
+- `hvp_gt_residual_focus_loss`: stronger background residual regularization and lighter foreground residual regularization.
+- `hvp_gt_residual_fg_boost_loss`: a conservative foreground residual L1 placeholder; v2.7-b does not force residual magnitude to grow.
+
+The goal is to make HVP residuals concentrate on object regions, reduce background perturbation, and help AP@0.3/AP@0.5 while avoiding the ego-only degradation seen in earlier long runs. With `gt_guided.enabled=false`, v2.7-a behavior is unchanged; no new trainable parameters or checkpoint keys are introduced.
 
 ## v3.0 Packet Mode
 

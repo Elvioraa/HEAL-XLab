@@ -126,6 +126,7 @@ class PointPillarLoss(nn.Module):
                 aux_payload = output_dict["hvp_cbea_aux"]
                 aux_loss, aux_stats = compute_hvp_auxiliary_loss(
                     aux_payload,
+                    target_dict=target_dict,
                     fallback_on_error=bool(aux_payload.get("fallback_on_error", True)),
                 )
                 if torch.is_tensor(aux_loss):

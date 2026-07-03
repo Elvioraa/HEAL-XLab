@@ -352,7 +352,12 @@ class HeterPyramidCollabHvpCbea(HeterPyramidCollab):
                     debug["feature_shape_after"] = list(fused_feature_out.shape)
                     hvp_loss = self._compute_hvp_loss(hmap, reg, None, updated_hyps)
                     debug["hvp_loss"] = float(hvp_loss.detach().cpu()) if torch.is_tensor(hvp_loss) else 0.0
-                    return fused_feature_out, debug, hvp_loss, self._make_hvp_aux_payload(debug, fused_feature_out)
+                    return fused_feature_out, debug, hvp_loss, self._make_hvp_aux_payload(
+                        debug,
+                        fused_feature_out,
+                        hmap=hmap,
+                        reg=reg,
+                    )
                 if not self.hvp_cbea_cfg.get("fallback_on_error", True):
                     raise RuntimeError(packet_debug.get("packet_fallback_reason", "packet_mode_failed"))
 
@@ -379,7 +384,12 @@ class HeterPyramidCollabHvpCbea(HeterPyramidCollab):
             debug["feature_shape_after"] = list(fused_feature_out.shape)
             hvp_loss = self._compute_hvp_loss(hmap, reg, verif_logits, updated_hyps)
             debug["hvp_loss"] = float(hvp_loss.detach().cpu()) if torch.is_tensor(hvp_loss) else 0.0
-            return fused_feature_out, debug, hvp_loss, self._make_hvp_aux_payload(debug, fused_feature_out)
+            return fused_feature_out, debug, hvp_loss, self._make_hvp_aux_payload(
+                debug,
+                fused_feature_out,
+                hmap=hmap,
+                reg=reg,
+            )
         except Exception as exc:
             if self.hvp_cbea_cfg.get("fallback_on_error", True):
                 debug["fallback_reason"] = "exception:%s" % type(exc).__name__
@@ -510,7 +520,8 @@ class HeterPyramidCollabHvpCbea(HeterPyramidCollab):
             "budget_saturated": False,
         }
 
-    def _make_hvp_aux_payload(self, debug, ref_tensor=None, fallback_reason=""):
+    def _make_hvp_aux_payload(self, debug, ref_tensor=None, fallback_reason="",
+                              hmap=None, reg=None):
         if not self.hvp_aux_loss_enabled:
             return None
         aux_tensors = self.bayesian_hypothesis_fusion.get_aux_tensors()
@@ -526,6 +537,12 @@ class HeterPyramidCollabHvpCbea(HeterPyramidCollab):
         }
         if torch.is_tensor(ref_tensor):
             payload["loss_ref_tensor"] = ref_tensor.sum() * 0.0
+        if torch.is_tensor(hmap):
+            payload["hypothesis_hmap"] = hmap
+            payload["hmap"] = hmap
+        if torch.is_tensor(reg):
+            payload["hypothesis_reg"] = reg
+            payload["reg"] = reg
         return payload
 
     def _collect_collaborator_features(self, heter_feature_2d, record_len):
