@@ -473,6 +473,53 @@ Base hash: `180f553`
 - Run an `enabled=true` untrained sanity final_infer to verify identity-start behavior.
 - Run a short `train_only_hvp` fine-tune to test whether the safer residual update improves AP@0.7.
 
+## HEAL-XLab-v2.6 collaboration-aware residual gate
+
+Base hash: `f246f2d`
+
+### Motivation
+
+- v2.5 residual-gate long training showed useful multi-CAV gains, especially in `use_cav2`, `use_cav3`, and `use_cav4` AP@0.7.
+- `use_cav1` regressed, suggesting residual HVP-CBEA updates can perturb ego-only features when no collaborator evidence exists.
+- v2.6 targets an inference-only ablation path: use a v2.5 checkpoint, enable collaboration-aware scaling in config, and suppress residuals only for ego-only scenes.
+
+### Fix
+
+- `opencood/models/sub_modules/bayesian_hypothesis_fusion.py`
+  - Adds default-disabled `residual_gate.collaboration_aware`.
+  - Computes `effective_alpha = alpha * collaboration_scale`.
+  - Supports scalar and batch-wise collaboration scales without adding checkpoint parameters.
+  - Adds residual debug fields for record length, collaborator presence, collaboration scale, effective alpha, and fallback reason.
+- `opencood/models/heter_pyramid_collab_hvp_cbea.py`
+  - Reads `record_len` from the existing forward path.
+  - Computes collaboration scale before feature or packet residual application.
+  - Passes scale into the existing v2.5 residual gate.
+- `opencood/tools/check_hvp_cbea_smoke.py`
+  - Adds smoke coverage for `record_len=[1]` suppression, `record_len=[2]` active residual, and disabled-mode v2.5 equivalence.
+
+### Config
+
+```yaml
+residual_gate:
+  collaboration_aware:
+    enabled: false
+    no_collab_scale: 0.0
+    collab_scale: 1.0
+    min_cav: 2
+    use_record_len: true
+    fallback_scale: 1.0
+    debug: false
+```
+
+### Safety
+
+- Default `collaboration_aware.enabled=false` preserves v2.5 behavior.
+- No new trainable parameter or checkpoint key is added.
+- `enabled=false` still follows the official HEAL path.
+- Official `heter_pyramid_collab.py` is not modified.
+- v1 HBEC is not modified.
+- No logs config is added.
+
 ## HEAL-XLab-v3.0 packet mode
 
 Base hash: `25509b7`

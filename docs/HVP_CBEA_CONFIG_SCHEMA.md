@@ -30,6 +30,14 @@ model:
         alpha_init: 0.05
         alpha_max: 0.3
         learnable: true
+        collaboration_aware:
+          enabled: false
+          no_collab_scale: 0.0
+          collab_scale: 1.0
+          min_cav: 2
+          use_record_len: true
+          fallback_scale: 1.0
+          debug: false
       packet:
         enabled: false
         mode: packet_one_round
@@ -76,6 +84,14 @@ model:
         alpha_init: 0.05
         alpha_max: 0.3
         learnable: true
+        collaboration_aware:
+          enabled: false
+          no_collab_scale: 0.0
+          collab_scale: 1.0
+          min_cav: 2
+          use_record_len: true
+          fallback_scale: 1.0
+          debug: false
       packet:
         enabled: false
       debug: true
@@ -119,6 +135,31 @@ fused_feature_out = fused_feature + alpha * delta_feature
 ```
 
 `alpha` is stored inside `bayesian_hypothesis_fusion` as a bounded residual parameter. The default initialization is close to identity, reducing the chance that untrained HVP-CBEA modules strongly disturb the inherited HEAL feature. `train_only_hvp: true` still trains only HVP-CBEA prefixes, and the v2.4 non-HVP BatchNorm buffer freeze remains active.
+
+## v2.6 Collaboration-aware Residual Gate
+
+If `collaboration_aware` is omitted, it defaults to disabled:
+
+```yaml
+residual_gate:
+  collaboration_aware:
+    enabled: false
+    no_collab_scale: 0.0
+    collab_scale: 1.0
+    min_cav: 2
+    use_record_len: true
+    fallback_scale: 1.0
+    debug: false
+```
+
+When enabled, the residual update becomes:
+
+```text
+effective_alpha = alpha * collaboration_scale
+fused_feature_out = fused_feature + effective_alpha * delta_feature
+```
+
+`record_len <= 1` uses `no_collab_scale` and suppresses ego-only residual by default. `record_len >= min_cav` uses `collab_scale` and preserves the v2.5 residual strength by default. With `collaboration_aware.enabled: false`, `collaboration_scale=1.0`, so the v2.5 path is unchanged.
 
 ## v3.0 Packet Mode
 

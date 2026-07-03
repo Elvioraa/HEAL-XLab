@@ -319,12 +319,19 @@ class HeterPyramidCollabHvpCbea(HeterPyramidCollab):
         try:
             ego_hyps, hmap, reg = self.hypothesis_encoder(fused_feature)
             debug["ego_hyp_count"] = int((ego_hyps[..., 8] > 0).sum().detach().cpu()) if ego_hyps is not None else 0
+            collaboration_scale, collaboration_debug = self._compute_collaboration_scale(
+                record_len,
+                fused_feature,
+            )
+            debug.update(collaboration_debug)
             if self.hvp_packet_enabled:
                 packet_result, packet_debug = self._apply_hvp_packet_mode(
                     fused_feature=fused_feature,
                     heter_feature_2d=heter_feature_2d,
                     record_len=record_len,
                     ego_hyps=ego_hyps,
+                    collaboration_scale=collaboration_scale,
+                    collaboration_debug=collaboration_debug,
                 )
                 debug.update(packet_debug)
                 if packet_result is not None:
@@ -353,6 +360,8 @@ class HeterPyramidCollabHvpCbea(HeterPyramidCollab):
                 refine_delta,
                 novel_hyps,
                 fused_feature,
+                collaboration_scale=collaboration_scale,
+                collaboration_debug=collaboration_debug,
             )
             debug.update(self.bayesian_hypothesis_fusion.get_residual_debug())
             debug["updated_hyp_count"] = int((updated_hyps[..., 8] > 0).sum().detach().cpu()) if updated_hyps is not None else 0
@@ -366,7 +375,9 @@ class HeterPyramidCollabHvpCbea(HeterPyramidCollab):
                 return fused_feature, debug, fused_feature.sum() * 0.0
             raise
 
-    def _apply_hvp_packet_mode(self, fused_feature, heter_feature_2d, record_len, ego_hyps):
+    def _apply_hvp_packet_mode(self, fused_feature, heter_feature_2d, record_len,
+                               ego_hyps, collaboration_scale=None,
+                               collaboration_debug=None):
         debug = self._packet_debug_defaults()
         try:
             packet = self._build_hvp_scene_packet(heter_feature_2d, record_len, fused_feature)
@@ -382,6 +393,8 @@ class HeterPyramidCollabHvpCbea(HeterPyramidCollab):
             fused_feature_out = self.bayesian_hypothesis_fusion.apply_residual_delta(
                 fused_feature,
                 packet_delta,
+                collaboration_scale=collaboration_scale,
+                collaboration_debug=collaboration_debug,
             )
             debug.update(comm_stats)
             debug.update(aggregation_debug)
@@ -504,6 +517,16 @@ class HeterPyramidCollabHvpCbea(HeterPyramidCollab):
         weight = float(self.hvp_cbea_cfg.get("loss_weight_encoder", 0.5))
         return loss * weight
 
+    def _compute_collaboration_scale(self, record_len, ref_feature):
+        return BayesianHypothesisFusion.compute_collaboration_scale(
+            record_len,
+            self.hvp_cbea_cfg["residual_gate"].get("collaboration_aware"),
+            device=ref_feature.device,
+            dtype=ref_feature.dtype,
+            batch_size=int(ref_feature.shape[0]),
+            fallback_on_error=self.hvp_cbea_cfg.get("fallback_on_error", True),
+        )
+
     def _default_hvp_cfg(self, args):
         pc_range = args.get("lidar_range") or args.get("cav_lidar_range")
         return {
@@ -536,6 +559,7 @@ class HeterPyramidCollabHvpCbea(HeterPyramidCollab):
             "alpha_init": 0.05,
             "alpha_max": 0.3,
             "learnable": True,
+            "collaboration_aware": BayesianHypothesisFusion.default_collaboration_aware_cfg(),
         }
 
     @classmethod
@@ -549,6 +573,9 @@ class HeterPyramidCollabHvpCbea(HeterPyramidCollab):
         normalized["alpha_init"] = float(normalized.get("alpha_init", 0.05))
         normalized["alpha_max"] = float(normalized.get("alpha_max", 0.3))
         normalized["learnable"] = bool(normalized.get("learnable", True))
+        normalized["collaboration_aware"] = BayesianHypothesisFusion.normalize_collaboration_aware_cfg(
+            normalized.get("collaboration_aware")
+        )
         return normalized
 
     @staticmethod

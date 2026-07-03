@@ -26,6 +26,7 @@ HVP-CBEA is a model-forward-level experimental direction. It is independent of v
 - v2.1 adds `train_only_hvp`, allowing full collaborative fine-tuning while freezing official HEAL parameters.
 - v2.4 keeps inherited HEAL BatchNorm buffers frozen in `train_only_hvp` mode while leaving HVP-CBEA modules trainable.
 - v2.5 wraps the HVP-CBEA feature update in a bounded residual gate for identity-start safety.
+- v2.6 optionally suppresses the residual gate in ego-only scenes with no collaborator evidence.
 - v3.0 adds an optional packet communication path for low-bandwidth cross-vendor experiments.
 - GT-dependent auxiliary losses are defensive and return zero when GT format is not available.
 - No inference-time GT is used.
@@ -95,6 +96,36 @@ Default residual gate:
 The alpha parameter lives inside `bayesian_hypothesis_fusion`, so `train_only_hvp=true` keeps it trainable under the existing HVP-CBEA prefix rule. The output is not detached, and detection loss can still backpropagate through `bayesian_hypothesis_fusion`, `hypothesis_verifier`, `hypothesis_encoder`, and the collaborator projection.
 
 Debug fields include `hvp_cbea_residual_alpha`, `hvp_cbea_delta_norm`, `hvp_cbea_delta_mean`, and `hvp_cbea_delta_std`. The smoke test checks that residual alpha exists and receives gradient. Follow-up server work should run an enabled=true untrained sanity pass and a short `train_only_hvp` fine-tune.
+
+## v2.6 Collaboration-aware Residual Gate
+
+v2.5 long training showed that HVP-CBEA is useful in multi-CAV scenes, especially for AP@0.7, but can degrade `use_cav1`. v2.6 adds an optional collaboration-aware multiplier to suppress residual updates when `record_len` indicates no collaborator:
+
+```text
+effective_alpha = alpha * collaboration_scale
+fused_feature_out = fused_feature + effective_alpha * delta_feature
+```
+
+Default config keeps this disabled:
+
+```yaml
+residual_gate:
+  collaboration_aware:
+    enabled: false
+    no_collab_scale: 0.0
+    collab_scale: 1.0
+    min_cav: 2
+    use_record_len: true
+    fallback_scale: 1.0
+    debug: false
+```
+
+Expected ablation:
+
+- `use_cav1`: set `collaboration_scale=0.0` and suppress HVP residual perturbation.
+- `use_cav2/use_cav3/use_cav4`: keep `collaboration_scale=1.0` and preserve v2.5 residual behavior.
+
+This is intended for inference-only ablation with a v2.5 checkpoint: turn on `collaboration_aware.enabled=true` in config, run final_infer, and compare whether `use_cav1` recovers while multi-CAV gains remain.
 
 ## v3.0 Packet Mode
 

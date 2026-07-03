@@ -63,10 +63,101 @@ def main():
     fused_empty, updated_empty = fusion(empty_hyps, None, None, None, bev)
     assert fused_empty.shape == bev.shape
     assert updated_empty.shape == empty_hyps.shape
+    check_collaboration_aware_gate()
 
     print("HVP-CBEA smoke OK")
     print("HVP-CBEA backward OK")
     print("HVP-CBEA residual gate OK")
+    print("HVP-CBEA collaboration-aware gate OK")
+
+
+def check_collaboration_aware_gate():
+    base = torch.ones(1, 4, 3, 3)
+    delta = torch.full_like(base, 2.0)
+    cfg = {
+        "enabled": True,
+        "alpha_init": 0.05,
+        "alpha_max": 0.3,
+        "learnable": True,
+        "collaboration_aware": {
+            "enabled": True,
+            "no_collab_scale": 0.0,
+            "collab_scale": 1.0,
+            "min_cav": 2,
+            "use_record_len": True,
+            "fallback_scale": 1.0,
+            "debug": True,
+        },
+    }
+    fusion_ca = BayesianHypothesisFusion(in_channels=4, mid_channels=2, residual_gate=cfg)
+    no_collab_scale, no_collab_debug = BayesianHypothesisFusion.compute_collaboration_scale(
+        torch.tensor([1]),
+        cfg["collaboration_aware"],
+        device=base.device,
+        dtype=base.dtype,
+        batch_size=1,
+    )
+    no_collab_out = fusion_ca.apply_residual_delta(
+        base,
+        delta,
+        collaboration_scale=no_collab_scale,
+        collaboration_debug=no_collab_debug,
+    )
+    assert torch.allclose(no_collab_out, base)
+    no_collab_residual_debug = fusion_ca.get_residual_debug()
+    assert no_collab_residual_debug["hvp_cbea_collaboration_scale"] == 0.0
+    assert no_collab_residual_debug["hvp_cbea_effective_alpha"] == 0.0
+
+    collab_scale, collab_debug = BayesianHypothesisFusion.compute_collaboration_scale(
+        torch.tensor([2]),
+        cfg["collaboration_aware"],
+        device=base.device,
+        dtype=base.dtype,
+        batch_size=1,
+    )
+    collab_out = fusion_ca.apply_residual_delta(
+        base,
+        delta,
+        collaboration_scale=collab_scale,
+        collaboration_debug=collab_debug,
+    )
+    assert torch.isfinite(collab_out).all()
+    assert (collab_out - base).abs().sum() > 0
+    collab_residual_debug = fusion_ca.get_residual_debug()
+    assert collab_residual_debug["hvp_cbea_collaboration_scale"] == 1.0
+    assert collab_residual_debug["hvp_cbea_effective_alpha"] > 0.0
+
+    disabled_cfg = {
+        "enabled": True,
+        "alpha_init": 0.05,
+        "alpha_max": 0.3,
+        "learnable": True,
+        "collaboration_aware": {
+            "enabled": False,
+            "no_collab_scale": 0.0,
+            "collab_scale": 1.0,
+            "min_cav": 2,
+            "use_record_len": True,
+            "fallback_scale": 1.0,
+            "debug": False,
+        },
+    }
+    fusion_disabled = BayesianHypothesisFusion(in_channels=4, mid_channels=2, residual_gate=disabled_cfg)
+    disabled_scale, disabled_debug = BayesianHypothesisFusion.compute_collaboration_scale(
+        torch.tensor([1]),
+        disabled_cfg["collaboration_aware"],
+        device=base.device,
+        dtype=base.dtype,
+        batch_size=1,
+    )
+    disabled_out = fusion_disabled.apply_residual_delta(
+        base,
+        delta,
+        collaboration_scale=disabled_scale,
+        collaboration_debug=disabled_debug,
+    )
+    alpha = fusion_disabled._residual_alpha().to(dtype=base.dtype)
+    assert torch.allclose(disabled_out, base + alpha * delta)
 
 
 if __name__ == "__main__":
