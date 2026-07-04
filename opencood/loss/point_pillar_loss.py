@@ -9,7 +9,10 @@ import torch.nn.functional as F
 import numpy as np
 from opencood.utils.common_utils import limit_period
 from opencood.data_utils.post_processor.voxel_postprocessor import VoxelPostprocessor
-from opencood.loss.hvp_cbea_aux_loss import compute_hvp_auxiliary_loss
+from opencood.loss.hvp_cbea_aux_loss import (
+    compute_hvp_auxiliary_loss,
+    compute_hvp_v3_stage1_loss,
+)
 from icecream import ic
 
 class PointPillarLoss(nn.Module):
@@ -138,6 +141,15 @@ class PointPillarLoss(nn.Module):
                 self.loss_dict.update(aux_stats)
             if torch.is_tensor(hvp_cbea_loss_total):
                 self.loss_dict.update({'hvp_cbea_loss': hvp_cbea_loss_total.item()})
+            if "hvp_v3" in output_dict:
+                hvp_v3_loss, hvp_v3_stats = compute_hvp_v3_stage1_loss(
+                    output_dict["hvp_v3"],
+                    target_dict=target_dict,
+                    fallback_on_error=True,
+                )
+                if torch.is_tensor(hvp_v3_loss):
+                    total_loss += hvp_v3_loss
+                self.loss_dict.update(hvp_v3_stats)
 
         self.loss_dict.update({'total_loss': total_loss.item(),
                                'reg_loss': reg_loss.item(),
@@ -210,12 +222,20 @@ class PointPillarLoss(nn.Module):
         cls_loss = self.loss_dict.get('cls_loss', 0)
         dir_loss = self.loss_dict.get('dir_loss', 0)
         iou_loss = self.loss_dict.get('iou_loss', 0)
+        hvp_v3_enabled = self.loss_dict.get('hvp_v3_enabled', False)
+        hvp_v3_loss = self.loss_dict.get('hvp_v3_loss', 0)
+        hvp_v3_stage1_loss = self.loss_dict.get('hvp_v3_stage1_hypothesis_loss', 0)
 
-
-        print("[epoch %d][%d/%d]%s || Loss: %.4f || Conf Loss: %.4f"
-              " || Loc Loss: %.4f || Dir Loss: %.4f || IoU Loss: %.4f" % (
-                  epoch, batch_id + 1, batch_len, suffix,
-                  total_loss, cls_loss, reg_loss, dir_loss, iou_loss))
+        log_msg = ("[epoch %d][%d/%d]%s || Loss: %.4f || Conf Loss: %.4f"
+                   " || Loc Loss: %.4f || Dir Loss: %.4f || IoU Loss: %.4f" % (
+                       epoch, batch_id + 1, batch_len, suffix,
+                       total_loss, cls_loss, reg_loss, dir_loss, iou_loss))
+        if hvp_v3_enabled:
+            log_msg += " || HVP-v3 Loss: %.4f || Stage1 Hypothesis Loss: %.4f" % (
+                hvp_v3_loss,
+                hvp_v3_stage1_loss,
+            )
+        print(log_msg)
 
         if not writer is None:
             writer.add_scalar('Regression_loss'+suffix, reg_loss,
@@ -226,6 +246,12 @@ class PointPillarLoss(nn.Module):
                             epoch*batch_len + batch_id)
             writer.add_scalar('Iou_loss'+suffix, iou_loss,
                             epoch*batch_len + batch_id)
+            if hvp_v3_enabled:
+                writer.add_scalar('HVP_v3_loss' + suffix, hvp_v3_loss,
+                                epoch*batch_len + batch_id)
+                writer.add_scalar('Stage1_hypothesis_loss' + suffix,
+                                hvp_v3_stage1_loss,
+                                epoch*batch_len + batch_id)
 
 def one_hot_f(tensor, num_bins, dim=-1, on_value=1.0, dtype=torch.float32):
     tensor_onehot = torch.zeros(*list(tensor.shape), num_bins, dtype=dtype, device=tensor.device) 

@@ -715,6 +715,89 @@ packet:
 - Run short `train_only_hvp` packet fine-tune with packet debug enabled.
 - Replace pseudo top-K feature boxes with real detector box decoding at the packetizer boundary.
 
+## HEAL-XLab-v3.0 HVP-HEAL feature-main Stage1 skeleton
+
+Base hash: `d0faa22`
+
+### Goal
+
+- Start the HVP-HEAL Feature Main staged-training direction.
+- Add Stage1 Hypothesis-aware Base Training for m1 base features.
+- Keep this separate from the v2.x HVP-CBEA plug-in workflow and from the packet-mode experiment.
+
+### Added Files
+
+- `opencood/models/hvp_heal_v3/hypothesis_head.py`
+  - Adds a lightweight Conv-BN-ReLU hypothesis head.
+  - Outputs `hypothesis_heatmap_logits`, `hypothesis_heatmap`, and optional `hypothesis_feature`.
+- `opencood/models/heter_pyramid_collab_hvp_heal_v3.py`
+  - Adds a default-inert HEAL collab wrapper for v3 staged training.
+  - Calls official HEAL collab forward when `hvp_v3.enabled=false`.
+  - In Stage1, attaches the hypothesis head to the m1 ego pre-fusion BEV feature.
+- `opencood/tools/check_hvp_heal_v3_stage1_smoke.py`
+  - Covers disabled forward, enabled forward, Stage1 loss, backward, and state-dict key separation.
+- `opencood/hypes_yaml/HEAL_XLab_v3_HVP_HEAL/stage1/m1_hyp_base.yaml`
+  - Adds the Stage1 config template.
+- `docs/HVP_HEAL_V3_PLAN.md`
+- `docs/HVP_HEAL_V3_CONFIG_SCHEMA.md`
+
+### Modified Files
+
+- `opencood/loss/hvp_cbea_aux_loss.py`
+  - Adds `compute_hvp_v3_stage1_loss()`.
+  - Reuses anchor-positive target parsing from v2.7-b.
+- `opencood/loss/point_pillar_loss.py`
+  - Adds HVP-v3 Stage1 loss only when `output_dict["hvp_v3"]` exists.
+- `opencood/loss/point_pillar_depth_loss.py`
+- `opencood/loss/point_pillar_pyramid_loss.py`
+  - Logs `HVP-v3 Loss` and `Stage1 Hypothesis Loss` only when v3 loss is active.
+
+### Config
+
+```yaml
+hvp_v3:
+  enabled: false
+  stage: none
+```
+
+Stage1 template enables:
+
+```yaml
+hvp_v3:
+  enabled: true
+  stage: stage1_hypothesis
+  feature_main:
+    enabled: true
+  hypothesis_head:
+    enabled: true
+    in_channels: 64
+    hidden_dim: 64
+    out_channels: 1
+    use_sigmoid: true
+  aux_loss:
+    enabled: true
+    mode: stage1_hypothesis
+    hypothesis_heatmap:
+      enabled: true
+      weight: 0.01
+      pos_weight: 1.0
+    residual_reg:
+      enabled: false
+    alpha_reg:
+      enabled: false
+    residual_focus:
+      enabled: false
+```
+
+### Safety
+
+- Default `hvp_v3.enabled=false` emits no `hvp_v3` output and does not change the official HEAL path.
+- Stage1 only trains a hypothesis heatmap auxiliary path; residual focus, packet, hybrid, Stage2, and Stage3 are not implemented.
+- v2.x HVP-CBEA modules remain intact.
+- Official `heter_pyramid_collab.py` is not modified.
+- v1 HBEC is not modified.
+- No logs directory is modified.
+
 ## HEAL-XLab-v1.1-logfmt
 
 Change:

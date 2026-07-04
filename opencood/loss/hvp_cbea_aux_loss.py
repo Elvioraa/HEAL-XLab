@@ -178,6 +178,104 @@ def compute_hvp_auxiliary_loss(aux_dict, aux_cfg=None, target_dict=None,
         return zero, stats
 
 
+def default_hvp_v3_stage1_aux_loss_cfg():
+    return {
+        "enabled": False,
+        "mode": "stage1_hypothesis",
+        "hypothesis_heatmap": {
+            "enabled": False,
+            "weight": 0.01,
+            "pos_weight": 1.0,
+        },
+        "residual_reg": {
+            "enabled": False,
+        },
+        "alpha_reg": {
+            "enabled": False,
+        },
+        "residual_focus": {
+            "enabled": False,
+        },
+    }
+
+
+def normalize_hvp_v3_stage1_aux_loss_cfg(cfg):
+    normalized = default_hvp_v3_stage1_aux_loss_cfg()
+    if isinstance(cfg, bool):
+        normalized["enabled"] = cfg
+    elif isinstance(cfg, dict):
+        _deep_update(normalized, cfg)
+    normalized["enabled"] = bool(normalized.get("enabled", False))
+    normalized["mode"] = str(normalized.get("mode", "stage1_hypothesis"))
+    heatmap = normalized["hypothesis_heatmap"]
+    heatmap["enabled"] = bool(heatmap.get("enabled", False))
+    heatmap["weight"] = float(heatmap.get("weight", 0.01))
+    heatmap["pos_weight"] = float(heatmap.get("pos_weight", 1.0))
+    for key in ("residual_reg", "alpha_reg", "residual_focus"):
+        if isinstance(normalized.get(key), bool):
+            enabled = bool(normalized[key])
+            normalized[key] = {"enabled": enabled}
+        elif not isinstance(normalized.get(key), dict):
+            normalized[key] = {"enabled": False}
+        normalized[key]["enabled"] = bool(normalized[key].get("enabled", False))
+    return normalized
+
+
+def compute_hvp_v3_stage1_loss(hvp_v3_dict, target_dict=None,
+                               fallback_on_error=True):
+    cfg = normalize_hvp_v3_stage1_aux_loss_cfg(
+        (hvp_v3_dict or {}).get("aux_loss_cfg")
+    )
+    ref_tensor = None
+    if isinstance(hvp_v3_dict, dict):
+        ref_tensor = hvp_v3_dict.get("hypothesis_heatmap_logits")
+        if not torch.is_tensor(ref_tensor):
+            ref_tensor = hvp_v3_dict.get("hypothesis_heatmap")
+    zero = _zero_like(ref_tensor)
+    stats = _zero_hvp_v3_stats()
+    stats["hvp_v3_enabled"] = bool(isinstance(hvp_v3_dict, dict) and hvp_v3_dict.get("enabled", False))
+    stats["hvp_v3_stage"] = (hvp_v3_dict or {}).get("stage", "")
+    if not cfg["enabled"]:
+        return zero, stats
+    if cfg["mode"] != "stage1_hypothesis":
+        stats["hvp_v3_fallback_reason"] = "unsupported_mode:%s" % cfg["mode"]
+        return zero, stats
+    if not cfg["hypothesis_heatmap"].get("enabled", False):
+        return zero, stats
+
+    try:
+        if not isinstance(hvp_v3_dict, dict):
+            raise ValueError("hvp_v3 output is missing")
+        logits = hvp_v3_dict.get("hypothesis_heatmap_logits")
+        if not torch.is_tensor(logits):
+            raise ValueError("hvp_v3 hypothesis_heatmap_logits is missing")
+        pos_map, source = _extract_anchor_positive_map(target_dict, logits)
+        target = _resize_positive_map(pos_map, logits)
+        heatmap_cfg = cfg["hypothesis_heatmap"]
+        pos_weight = logits.new_tensor(heatmap_cfg.get("pos_weight", 1.0))
+        loss = F.binary_cross_entropy_with_logits(
+            logits.float(),
+            target.float(),
+            pos_weight=pos_weight,
+        )
+        weighted = loss * heatmap_cfg["weight"]
+        if not torch.isfinite(weighted):
+            raise ValueError("HVP-v3 Stage1 hypothesis loss is not finite")
+        stats.update({
+            "hvp_v3_loss": _item(weighted),
+            "hvp_v3_stage1_hypothesis_loss": _item(weighted),
+            "hvp_v3_target_source": source,
+            "hvp_v3_fg_ratio": _item(target.float().mean()),
+            "hvp_v3_fallback_reason": "",
+        })
+        return weighted, stats
+    except Exception as exc:
+        if not fallback_on_error:
+            raise ValueError("HVP-v3 Stage1 hypothesis loss failed: %s" % exc) from exc
+        stats["hvp_v3_fallback_reason"] = "%s:%s" % (type(exc).__name__, str(exc))
+        return zero, stats
+
+
 def _compute_gt_guided_loss(aux_dict, target_dict, gt_cfg, fallback_on_error=True):
     zero = _zero_like(_find_ref_tensor(aux_dict))
     stats = _zero_gt_stats()
@@ -409,6 +507,18 @@ def _zero_gt_stats():
         "hvp_gt_fg_ratio": 0.0,
         "hvp_gt_target_source": "",
         "hvp_gt_fallback_reason": "",
+    }
+
+
+def _zero_hvp_v3_stats():
+    return {
+        "hvp_v3_enabled": False,
+        "hvp_v3_stage": "",
+        "hvp_v3_loss": 0.0,
+        "hvp_v3_stage1_hypothesis_loss": 0.0,
+        "hvp_v3_fg_ratio": 0.0,
+        "hvp_v3_target_source": "",
+        "hvp_v3_fallback_reason": "",
     }
 
 
