@@ -23,6 +23,10 @@ model:
     hvp_v3:
       enabled: true
       stage: stage1_hypothesis
+      stage1:
+        train_mode: hypothesis_head_only
+        freeze_base_model: true
+        detach_bev_for_hypothesis: true
       feature_main:
         enabled: true
       hypothesis_head:
@@ -45,6 +49,20 @@ model:
         residual_focus:
           enabled: false
 ```
+
+`stage1.train_mode: hypothesis_head_only` is the low-memory smoke mode. It freezes the inherited HEAL base model, keeps only `hvp_v3_hypothesis_head` trainable, and detaches the BEV feature before the hypothesis head so the backbone graph is not retained for backward.
+
+Future full joint Stage1 training should be explicit:
+
+```yaml
+hvp_v3:
+  stage1:
+    train_mode: joint
+    freeze_base_model: false
+    detach_bev_for_hypothesis: false
+```
+
+The joint mode is not the default because it requires more memory and may need AMP or gradient checkpointing on server GPUs.
 
 The hypothesis head outputs:
 

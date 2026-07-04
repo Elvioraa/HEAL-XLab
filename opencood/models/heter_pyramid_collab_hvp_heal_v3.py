@@ -84,10 +84,13 @@ if "pyquaternion" not in sys.modules:
 from opencood.models.heter_pyramid_collab import HeterPyramidCollab
 from opencood.models.hvp_heal_v3.hypothesis_head import HvpHealV3HypothesisHead
 from opencood.utils.transformation_utils import normalize_pairwise_tfm
+from opencood.utils.model_utils import check_trainable_module
 
 
 class HeterPyramidCollabHvpHealV3(HeterPyramidCollab):
     """HEAL pyramid collab with optional HVP-HEAL v3 Stage1 hypothesis head."""
+
+    HVP_V3_MODULE_PREFIXES = ("hvp_v3_hypothesis_head",)
 
     def __init__(self, args):
         super().__init__(args)
@@ -103,6 +106,15 @@ class HeterPyramidCollabHvpHealV3(HeterPyramidCollab):
                 use_sigmoid=bool(head_cfg.get("use_sigmoid", True)),
                 return_feature=bool(head_cfg.get("return_feature", True)),
             )
+            self._apply_stage1_train_mode()
+            check_trainable_module(self)
+
+    def train(self, mode=True):
+        super().train(mode)
+        if mode and self._is_stage1_enabled() and self._stage1_freeze_base_model():
+            self._set_base_model_eval()
+            self.hvp_v3_hypothesis_head.train(True)
+        return self
 
     def forward(self, data_dict):
         if not self._is_stage1_enabled():
@@ -110,6 +122,13 @@ class HeterPyramidCollabHvpHealV3(HeterPyramidCollab):
         return self._forward_stage1_hypothesis(data_dict)
 
     def _forward_stage1_hypothesis(self, data_dict):
+        base_grad_enabled = not self._stage1_freeze_base_model()
+        with torch.set_grad_enabled(base_grad_enabled):
+            output_dict, hvp_v3_stage1_feature = self._forward_stage1_base(data_dict)
+        self._append_hvp_v3_stage1_output(output_dict, hvp_v3_stage1_feature)
+        return output_dict
+
+    def _forward_stage1_base(self, data_dict):
         output_dict = {"pyramid": "collab"}
         agent_modality_list = data_dict["agent_modality_list"]
         affine_matrix = normalize_pairwise_tfm(
@@ -174,8 +193,6 @@ class HeterPyramidCollabHvpHealV3(HeterPyramidCollab):
         if self.shrink_flag:
             fused_feature = self.shrink_conv(fused_feature)
 
-        self._append_hvp_v3_stage1_output(output_dict, hvp_v3_stage1_feature)
-
         cls_preds = self.cls_head(fused_feature)
         reg_preds = self.reg_head(fused_feature)
         dir_preds = self.dir_head(fused_feature)
@@ -186,7 +203,7 @@ class HeterPyramidCollabHvpHealV3(HeterPyramidCollab):
             "dir_preds": dir_preds,
             "occ_single_list": occ_outputs,
         })
-        return output_dict
+        return output_dict, hvp_v3_stage1_feature
 
     @staticmethod
     def _select_ego_feature(heter_feature_2d, record_len):
@@ -201,11 +218,16 @@ class HeterPyramidCollabHvpHealV3(HeterPyramidCollab):
     def _append_hvp_v3_stage1_output(self, output_dict, bev_feature):
         if not self._is_stage1_enabled():
             return output_dict
+        if self._stage1_detach_bev_for_hypothesis():
+            bev_feature = bev_feature.detach()
         head_output = self.hvp_v3_hypothesis_head(bev_feature)
         output_dict["hvp_v3"] = {
             "enabled": True,
             "stage": "stage1_hypothesis",
             "feature_main": bool(self.hvp_v3_cfg["feature_main"].get("enabled", False)),
+            "train_mode": self._stage1_train_mode(),
+            "freeze_base_model": self._stage1_freeze_base_model(),
+            "detach_bev_for_hypothesis": self._stage1_detach_bev_for_hypothesis(),
             "hypothesis_heatmap_logits": head_output["hypothesis_heatmap_logits"],
             "hypothesis_heatmap": head_output["hypothesis_heatmap"],
             "aux_loss_cfg": self.hvp_v3_cfg["aux_loss"],
@@ -222,6 +244,36 @@ class HeterPyramidCollabHvpHealV3(HeterPyramidCollab):
             and bool(self.hvp_v3_cfg["hypothesis_head"].get("enabled", False))
         )
 
+    def _apply_stage1_train_mode(self):
+        if not self._is_stage1_enabled():
+            return
+        if self._stage1_freeze_base_model():
+            for name, param in self.named_parameters():
+                param.requires_grad_(self._is_hvp_v3_module_name(name))
+            self._set_base_model_eval()
+            self.hvp_v3_hypothesis_head.train(True)
+        else:
+            for param in self.hvp_v3_hypothesis_head.parameters():
+                param.requires_grad_(True)
+
+    def _set_base_model_eval(self):
+        for module_name, module in self.named_modules():
+            if module_name == "" or self._is_hvp_v3_module_name(module_name):
+                continue
+            module.eval()
+
+    def _stage1_train_mode(self):
+        return str(self.hvp_v3_cfg["stage1"].get("train_mode", "hypothesis_head_only"))
+
+    def _stage1_freeze_base_model(self):
+        return bool(self.hvp_v3_cfg["stage1"].get("freeze_base_model", True))
+
+    def _stage1_detach_bev_for_hypothesis(self):
+        return bool(self.hvp_v3_cfg["stage1"].get("detach_bev_for_hypothesis", True))
+
+    def _is_hvp_v3_module_name(self, module_name):
+        return any(module_name.startswith(prefix) for prefix in self.HVP_V3_MODULE_PREFIXES)
+
     @classmethod
     def _normalize_hvp_v3_cfg(cls, cfg):
         normalized = cls._default_hvp_v3_cfg()
@@ -231,6 +283,12 @@ class HeterPyramidCollabHvpHealV3(HeterPyramidCollab):
             _deep_update(normalized, cfg)
         normalized["enabled"] = bool(normalized.get("enabled", False))
         normalized["stage"] = str(normalized.get("stage", "none"))
+        stage1 = normalized["stage1"]
+        stage1["train_mode"] = str(stage1.get("train_mode", "hypothesis_head_only"))
+        stage1["freeze_base_model"] = bool(stage1.get("freeze_base_model", True))
+        stage1["detach_bev_for_hypothesis"] = bool(
+            stage1.get("detach_bev_for_hypothesis", True)
+        )
         normalized["feature_main"]["enabled"] = bool(
             normalized["feature_main"].get("enabled", False)
         )
@@ -258,6 +316,11 @@ class HeterPyramidCollabHvpHealV3(HeterPyramidCollab):
         return {
             "enabled": False,
             "stage": "none",
+            "stage1": {
+                "train_mode": "hypothesis_head_only",
+                "freeze_base_model": True,
+                "detach_bev_for_hypothesis": True,
+            },
             "feature_main": {
                 "enabled": False,
             },

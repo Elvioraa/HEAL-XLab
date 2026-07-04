@@ -798,6 +798,64 @@ hvp_v3:
 - v1 HBEC is not modified.
 - No logs directory is modified.
 
+## HEAL-XLab-v3.0 Stage1 smoke training mode fix
+
+Base hash: `74fa8d2`
+
+### Motivation
+
+- The first server Stage1 1-epoch smoke run hit CUDA OOM during the HEAL base forward near `shrink_conv`.
+- The trainable-module summary did not list the newly added hypothesis head because the official HEAL constructor printed trainability before the v3 head was registered.
+- Smoke training only needs to verify dataloader/train/loss/checkpoint wiring and hypothesis-head gradients, not full joint HEAL training.
+
+### Fix
+
+- `opencood/models/heter_pyramid_collab_hvp_heal_v3.py`
+  - Adds `hvp_v3.stage1.train_mode`.
+  - Adds `freeze_base_model` and `detach_bev_for_hypothesis`.
+  - Registers `self.hvp_v3_hypothesis_head` as the only trainable module in `hypothesis_head_only` mode.
+  - Runs the inherited HEAL base path under `torch.no_grad()` when the base is frozen.
+  - Runs the hypothesis head outside the no-grad base path so Stage1 loss can backpropagate into the head.
+  - Prints a second trainable-module summary after applying the v3 train mode, so `hvp_v3_hypothesis_head` appears in logs.
+- `opencood/tools/check_hvp_heal_v3_stage1_smoke.py`
+  - Checks base parameters are frozen in head-only mode.
+  - Checks hypothesis-head parameters are trainable.
+  - Checks backward produces non-zero hypothesis-head gradients and no base gradients.
+- `opencood/hypes_yaml/HEAL_XLab_v3_HVP_HEAL/stage1/m1_hyp_base.yaml`
+  - Enables the low-memory Stage1 smoke mode.
+
+### Config
+
+```yaml
+hvp_v3:
+  enabled: true
+  stage: stage1_hypothesis
+  stage1:
+    train_mode: hypothesis_head_only
+    freeze_base_model: true
+    detach_bev_for_hypothesis: true
+```
+
+Future full joint Stage1 remains explicit:
+
+```yaml
+hvp_v3:
+  stage1:
+    train_mode: joint
+    freeze_base_model: false
+    detach_bev_for_hypothesis: false
+```
+
+### Safety
+
+- The default v3 config is still disabled.
+- `hvp_v3.enabled=false` still emits no `hvp_v3` output and follows the old path.
+- Stage2, Stage3, packet, and hybrid modes are not implemented.
+- v2.x HVP-CBEA modules remain intact.
+- Official `heter_pyramid_collab.py` is not modified.
+- v1 HBEC is not modified.
+- No logs directory is modified.
+
 ## HEAL-XLab-v1.1-logfmt
 
 Change:

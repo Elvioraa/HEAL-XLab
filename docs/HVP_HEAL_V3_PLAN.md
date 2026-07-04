@@ -16,6 +16,34 @@ m1 input
 
 The original HEAL detection path remains intact. The hypothesis head receives the m1 ego pre-fusion BEV feature and predicts `hypothesis_heatmap_logits` plus `hypothesis_heatmap`. The loss is BCE-with-logits against an anchor-positive map derived from `target_dict["pos_equal_one"]`.
 
+## Stage1 Smoke Mode
+
+The first Stage1 server run is a low-memory smoke mode:
+
+```yaml
+hvp_v3:
+  stage1:
+    train_mode: hypothesis_head_only
+    freeze_base_model: true
+    detach_bev_for_hypothesis: true
+```
+
+This mode is only meant to verify the real dataloader, train loop, loss wiring, gradients, checkpoint save/load shape, and logging. It freezes the inherited HEAL base model and trains only `hvp_v3_hypothesis_head`. The BEV feature passed into the hypothesis head is detached, so Stage1 hypothesis loss does not retain the full HEAL backbone graph.
+
+## Stage1 Full Joint Mode
+
+Full joint Stage1 training is reserved for follow-up:
+
+```yaml
+hvp_v3:
+  stage1:
+    train_mode: joint
+    freeze_base_model: false
+    detach_bev_for_hypothesis: false
+```
+
+Joint mode can train the base model and hypothesis head together, but it is not the default because it has much higher memory pressure and may require AMP or gradient checkpointing.
+
 ## Why This Is Not v2.x Plug-in
 
 v2.x HVP-CBEA is an optional module inserted after a trained HEAL checkpoint and can be trained with `train_only_hvp=true`. v3 starts a new staged-training mainline:

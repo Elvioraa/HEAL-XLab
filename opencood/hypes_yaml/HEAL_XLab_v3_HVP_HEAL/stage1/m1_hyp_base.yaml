@@ -85,6 +85,10 @@ model:
     hvp_v3:
       enabled: true
       stage: stage1_hypothesis
+      stage1:
+        train_mode: hypothesis_head_only
+        freeze_base_model: true
+        detach_bev_for_hypothesis: true
       feature_main:
         enabled: true
       hypothesis_head:
