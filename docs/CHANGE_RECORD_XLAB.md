@@ -856,6 +856,64 @@ hvp_v3:
 - v1 HBEC is not modified.
 - No logs directory is modified.
 
+## HEAL-XLab-v3.0 Stage2 evidence-aware modality adaptation
+
+Base hash: `eac2db4`
+
+### Motivation
+
+- A server run of `m2_alignto_m1` accidentally used ordinary HEAL Stage2.
+- Its logs showed only Conf/Loc/Dir/Depth/Pyramid losses and no evidence loss, so it is not an official HVP-v3 Stage2 experiment.
+- Stage2 now needs m2/m3/m4 to train normal detection outputs plus evidence heatmap, uncertainty, and descriptor outputs.
+
+### Implementation
+
+- `opencood/models/hvp_heal_v3/evidence_head.py`
+  - Adds `HvpHealV3EvidenceHead`.
+  - Outputs `evidence_heatmap_logits`, `evidence_heatmap`, `evidence_uncertainty`, and `evidence_descriptor`.
+- `opencood/models/heter_pyramid_single_hvp_heal_v3.py`
+  - Adds a default-inert Stage2 single-modality wrapper.
+  - Calls the official HEAL single forward unchanged unless `hvp_v3.enabled=true`, `stage=stage2_evidence`, and `use_hvp_v3_evidence=true`.
+  - Attaches `hvp_v3_evidence_head` to the shrink-stage BEV feature.
+  - Filters incompatible checkpoint keys so Stage1 keys such as `hvp_v3_hypothesis_head`, `encoder_m1`, and `backbone_m1` do not crash Stage2 loading.
+- `opencood/loss/hvp_cbea_aux_loss.py`
+  - Adds Stage2 evidence loss helpers.
+  - Keeps Stage1 hypothesis loss unchanged.
+- `opencood/loss/point_pillar_loss.py`
+- `opencood/loss/point_pillar_depth_loss.py`
+- `opencood/loss/point_pillar_pyramid_loss.py`
+  - Dispatch HVP-v3 loss by `output_dict["hvp_v3"]["stage"]`.
+  - Log `HVP-v3 Loss` and `Stage2 Evidence Loss`.
+- `opencood/tools/check_hvp_heal_v3_stage2_smoke.py`
+  - Checks m2/m3/m4 forward, evidence tensor shapes, total-loss integration, backward gradients, and checkpoint key filtering.
+- `opencood/hypes_yaml/HEAL_XLab_v3_HVP_HEAL/stage2/`
+  - Adds explicit m2/m3/m4 Stage2 evidence adaptation templates.
+
+### Config
+
+```yaml
+hvp_v3:
+  enabled: true
+  stage: stage2_evidence
+  stage2:
+    train_mode: evidence_adaptation
+    use_hvp_v3_evidence: true
+  evidence_head:
+    enable: true
+  evidence_loss:
+    enable: true
+```
+
+### Safety
+
+- Default `hvp_v3.enabled=false` still keeps official HEAL behavior.
+- Existing ordinary `heter_pyramid_single` configs are not changed.
+- Stage1 logic remains intact.
+- Stage3, packet, and hybrid modes are not implemented here.
+- Official `heter_pyramid_collab.py` is not modified.
+- v2.x HVP-CBEA modules and v1 HBEC are not modified.
+- No logs directory is modified.
+
 ## HEAL-XLab-v1.1-logfmt
 
 Change:

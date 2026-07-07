@@ -56,7 +56,9 @@ def normalize_hvp_aux_loss_cfg(cfg):
         normalized["enabled"] = cfg
     elif isinstance(cfg, dict):
         _deep_update(normalized, cfg)
-    normalized["enabled"] = bool(normalized.get("enabled", False))
+    normalized["enabled"] = bool(
+        normalized.get("enabled", False) or normalized.get("enable", False)
+    )
     normalized["debug"] = bool(normalized.get("debug", False))
 
     residual = normalized["residual_reg"]
@@ -94,7 +96,9 @@ def normalize_hvp_aux_loss_cfg(cfg):
             gt_guided[key] = default_hvp_aux_loss_cfg()["gt_guided"][key]
 
     heatmap = gt_guided["hypothesis_heatmap"]
-    heatmap["enabled"] = bool(heatmap.get("enabled", False))
+    heatmap["enabled"] = bool(
+        heatmap.get("enabled", False) or heatmap.get("enable", False)
+    )
     heatmap["weight"] = float(heatmap.get("weight", 0.05))
     heatmap["source"] = str(heatmap.get("source", "anchor_pos"))
     heatmap["loss"] = str(heatmap.get("loss", "bce")).lower()
@@ -274,6 +278,146 @@ def compute_hvp_v3_stage1_loss(hvp_v3_dict, target_dict=None,
             raise ValueError("HVP-v3 Stage1 hypothesis loss failed: %s" % exc) from exc
         stats["hvp_v3_fallback_reason"] = "%s:%s" % (type(exc).__name__, str(exc))
         return zero, stats
+
+
+def default_hvp_v3_stage2_evidence_loss_cfg():
+    return {
+        "enabled": False,
+        "mode": "stage2_evidence",
+        "evidence_heatmap": {
+            "enabled": False,
+            "weight": 0.01,
+            "pos_weight": 1.0,
+        },
+        "uncertainty": {
+            "enabled": False,
+            "weight": 0.001,
+        },
+        "descriptor": {
+            "enabled": False,
+            "weight": 0.001,
+        },
+    }
+
+
+def normalize_hvp_v3_stage2_evidence_loss_cfg(cfg):
+    normalized = default_hvp_v3_stage2_evidence_loss_cfg()
+    if isinstance(cfg, bool):
+        normalized["enabled"] = cfg
+    elif isinstance(cfg, dict):
+        _deep_update(normalized, cfg)
+    normalized["enabled"] = bool(normalized.get("enabled", False))
+    normalized["mode"] = str(normalized.get("mode", "stage2_evidence"))
+    heatmap = normalized["evidence_heatmap"]
+    heatmap["enabled"] = bool(heatmap.get("enabled", False))
+    heatmap["weight"] = float(heatmap.get("weight", 0.01))
+    heatmap["pos_weight"] = float(heatmap.get("pos_weight", 1.0))
+    uncertainty = normalized["uncertainty"]
+    uncertainty["enabled"] = bool(
+        uncertainty.get("enabled", False) or uncertainty.get("enable", False)
+    )
+    uncertainty["weight"] = float(uncertainty.get("weight", 0.001))
+    descriptor = normalized["descriptor"]
+    descriptor["enabled"] = bool(
+        descriptor.get("enabled", False) or descriptor.get("enable", False)
+    )
+    descriptor["weight"] = float(descriptor.get("weight", 0.001))
+    return normalized
+
+
+def compute_hvp_v3_stage2_evidence_loss(hvp_v3_dict, target_dict=None,
+                                        fallback_on_error=True):
+    cfg = normalize_hvp_v3_stage2_evidence_loss_cfg(
+        (hvp_v3_dict or {}).get("evidence_loss_cfg")
+    )
+    ref_tensor = None
+    if isinstance(hvp_v3_dict, dict):
+        ref_tensor = hvp_v3_dict.get("evidence_heatmap_logits")
+        if not torch.is_tensor(ref_tensor):
+            ref_tensor = hvp_v3_dict.get("evidence_heatmap")
+    zero = _zero_like(ref_tensor)
+    stats = _zero_hvp_v3_stats()
+    stats["hvp_v3_enabled"] = bool(
+        isinstance(hvp_v3_dict, dict) and hvp_v3_dict.get("enabled", False)
+    )
+    stats["hvp_v3_stage"] = (hvp_v3_dict or {}).get("stage", "")
+    if not cfg["enabled"]:
+        return zero, stats
+    if cfg["mode"] != "stage2_evidence":
+        stats["hvp_v3_fallback_reason"] = "unsupported_mode:%s" % cfg["mode"]
+        return zero, stats
+
+    try:
+        if not isinstance(hvp_v3_dict, dict):
+            raise ValueError("hvp_v3 output is missing")
+        logits = hvp_v3_dict.get("evidence_heatmap_logits")
+        if not torch.is_tensor(logits):
+            raise ValueError("hvp_v3 evidence_heatmap_logits is missing")
+        pos_map, source = _extract_anchor_positive_map(target_dict, logits)
+        target = _resize_positive_map(pos_map, logits)
+        losses = []
+
+        heatmap_cfg = cfg["evidence_heatmap"]
+        if heatmap_cfg.get("enabled", False):
+            pos_weight = logits.new_tensor(heatmap_cfg.get("pos_weight", 1.0))
+            heatmap_loss = F.binary_cross_entropy_with_logits(
+                logits.float(),
+                target.float(),
+                pos_weight=pos_weight,
+            )
+            weighted = heatmap_loss * heatmap_cfg["weight"]
+            losses.append(weighted)
+            stats["hvp_v3_stage2_evidence_heatmap_loss"] = _item(weighted)
+
+        uncertainty_cfg = cfg["uncertainty"]
+        if uncertainty_cfg.get("enabled", False):
+            uncertainty = _require_tensor(hvp_v3_dict, "evidence_uncertainty")
+            fg_mask = _resize_positive_map(target, uncertainty)
+            denom = torch.clamp(fg_mask.sum(), min=1.0)
+            uncertainty_loss = (uncertainty.float() * fg_mask.float()).sum() / denom
+            weighted = uncertainty_loss * uncertainty_cfg["weight"]
+            losses.append(weighted)
+            stats["hvp_v3_stage2_uncertainty_loss"] = _item(weighted)
+
+        descriptor_cfg = cfg["descriptor"]
+        if descriptor_cfg.get("enabled", False):
+            descriptor = _require_tensor(hvp_v3_dict, "evidence_descriptor")
+            descriptor_loss = _descriptor_smoothness_loss(descriptor)
+            weighted = descriptor_loss * descriptor_cfg["weight"]
+            losses.append(weighted)
+            stats["hvp_v3_stage2_descriptor_loss"] = _item(weighted)
+
+        total = sum(losses, zero)
+        if not torch.isfinite(total):
+            raise ValueError("HVP-v3 Stage2 evidence loss is not finite")
+        stats.update({
+            "hvp_v3_loss": _item(total),
+            "hvp_v3_stage2_evidence_loss": _item(total),
+            "hvp_v3_target_source": source,
+            "hvp_v3_fg_ratio": _item(target.float().mean()),
+            "hvp_v3_fallback_reason": "",
+        })
+        return total, stats
+    except Exception as exc:
+        if not fallback_on_error:
+            raise ValueError("HVP-v3 Stage2 evidence loss failed: %s" % exc) from exc
+        stats["hvp_v3_fallback_reason"] = "%s:%s" % (type(exc).__name__, str(exc))
+        return zero, stats
+
+
+def compute_hvp_v3_loss(hvp_v3_dict, target_dict=None, fallback_on_error=True):
+    stage = (hvp_v3_dict or {}).get("stage", "")
+    if stage == "stage2_evidence":
+        return compute_hvp_v3_stage2_evidence_loss(
+            hvp_v3_dict,
+            target_dict=target_dict,
+            fallback_on_error=fallback_on_error,
+        )
+    return compute_hvp_v3_stage1_loss(
+        hvp_v3_dict,
+        target_dict=target_dict,
+        fallback_on_error=fallback_on_error,
+    )
 
 
 def _compute_gt_guided_loss(aux_dict, target_dict, gt_cfg, fallback_on_error=True):
@@ -461,6 +605,18 @@ def _is_probability_tensor(tensor):
     return bool((detached.min() >= -1e-4).item() and (detached.max() <= 1.0 + 1e-4).item())
 
 
+def _descriptor_smoothness_loss(descriptor):
+    descriptor = descriptor.float()
+    losses = []
+    if descriptor.shape[-1] > 1:
+        losses.append(torch.mean(torch.abs(descriptor[..., 1:] - descriptor[..., :-1])))
+    if descriptor.shape[-2] > 1:
+        losses.append(torch.mean(torch.abs(descriptor[..., 1:, :] - descriptor[..., :-1, :])))
+    if not losses:
+        return torch.mean(descriptor ** 2)
+    return sum(losses) / len(losses)
+
+
 def _find_ref_tensor(aux_dict):
     if not isinstance(aux_dict, dict):
         return None
@@ -469,6 +625,10 @@ def _find_ref_tensor(aux_dict):
         "delta_feature",
         "hypothesis_hmap",
         "hmap",
+        "evidence_heatmap_logits",
+        "evidence_heatmap",
+        "evidence_uncertainty",
+        "evidence_descriptor",
         "alpha",
         "effective_alpha",
         "loss_ref_tensor",
@@ -516,6 +676,10 @@ def _zero_hvp_v3_stats():
         "hvp_v3_stage": "",
         "hvp_v3_loss": 0.0,
         "hvp_v3_stage1_hypothesis_loss": 0.0,
+        "hvp_v3_stage2_evidence_loss": 0.0,
+        "hvp_v3_stage2_evidence_heatmap_loss": 0.0,
+        "hvp_v3_stage2_uncertainty_loss": 0.0,
+        "hvp_v3_stage2_descriptor_loss": 0.0,
         "hvp_v3_fg_ratio": 0.0,
         "hvp_v3_target_source": "",
         "hvp_v3_fallback_reason": "",

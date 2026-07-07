@@ -128,7 +128,21 @@ class PointPillarPyramidLoss(PointPillarDepthLoss):
         pyramid_loss = self.loss_dict.get('pyramid_loss', 0)
         hvp_v3_enabled = self.loss_dict.get('hvp_v3_enabled', False)
         hvp_v3_loss = self.loss_dict.get('hvp_v3_loss', 0)
+        hvp_v3_stage = self.loss_dict.get('hvp_v3_stage', "")
         hvp_v3_stage1_loss = self.loss_dict.get('hvp_v3_stage1_hypothesis_loss', 0)
+        hvp_v3_stage2_loss = self.loss_dict.get('hvp_v3_stage2_evidence_loss', 0)
+        hvp_v3_stage2_heatmap_loss = self.loss_dict.get(
+            'hvp_v3_stage2_evidence_heatmap_loss',
+            0,
+        )
+        hvp_v3_stage2_uncertainty_loss = self.loss_dict.get(
+            'hvp_v3_stage2_uncertainty_loss',
+            0,
+        )
+        hvp_v3_stage2_descriptor_loss = self.loss_dict.get(
+            'hvp_v3_stage2_descriptor_loss',
+            0,
+        )
 
         log_msg = ("[epoch %d][%d/%d]%s || Loss: %.4f || Conf Loss: %.4f"
                    " || Loc Loss: %.4f || Dir Loss: %.4f || IoU Loss: %.4f"
@@ -137,10 +151,23 @@ class PointPillarPyramidLoss(PointPillarDepthLoss):
                        total_loss, cls_loss, reg_loss, dir_loss, iou_loss,
                        depth_loss, pyramid_loss))
         if hvp_v3_enabled:
-            log_msg += " || HVP-v3 Loss: %.4f || Stage1 Hypothesis Loss: %.4f" % (
-                hvp_v3_loss,
-                hvp_v3_stage1_loss,
-            )
+            if hvp_v3_stage == "stage2_evidence":
+                log_msg += (
+                    " || HVP-v3 Loss: %.4f || Stage2 Evidence Loss: %.4f"
+                    " || Evidence Heatmap Loss: %.4f || Evidence Unc Loss: %.4f"
+                    " || Evidence Desc Loss: %.4f"
+                ) % (
+                    hvp_v3_loss,
+                    hvp_v3_stage2_loss,
+                    hvp_v3_stage2_heatmap_loss,
+                    hvp_v3_stage2_uncertainty_loss,
+                    hvp_v3_stage2_descriptor_loss,
+                )
+            else:
+                log_msg += " || HVP-v3 Loss: %.4f || Stage1 Hypothesis Loss: %.4f" % (
+                    hvp_v3_loss,
+                    hvp_v3_stage1_loss,
+                )
         print(log_msg)
 
         if not writer is None:
@@ -159,7 +186,21 @@ class PointPillarPyramidLoss(PointPillarDepthLoss):
             if hvp_v3_enabled:
                 writer.add_scalar('HVP_v3_loss' + suffix, hvp_v3_loss,
                                 epoch*batch_len + batch_id)
-                writer.add_scalar('Stage1_hypothesis_loss' + suffix,
-                                hvp_v3_stage1_loss,
-                                epoch*batch_len + batch_id)
+                if hvp_v3_stage == "stage2_evidence":
+                    writer.add_scalar('Stage2_evidence_loss' + suffix,
+                                    hvp_v3_stage2_loss,
+                                    epoch*batch_len + batch_id)
+                    writer.add_scalar('Stage2_evidence_heatmap_loss' + suffix,
+                                    hvp_v3_stage2_heatmap_loss,
+                                    epoch*batch_len + batch_id)
+                    writer.add_scalar('Stage2_evidence_uncertainty_loss' + suffix,
+                                    hvp_v3_stage2_uncertainty_loss,
+                                    epoch*batch_len + batch_id)
+                    writer.add_scalar('Stage2_evidence_descriptor_loss' + suffix,
+                                    hvp_v3_stage2_descriptor_loss,
+                                    epoch*batch_len + batch_id)
+                else:
+                    writer.add_scalar('Stage1_hypothesis_loss' + suffix,
+                                    hvp_v3_stage1_loss,
+                                    epoch*batch_len + batch_id)
 

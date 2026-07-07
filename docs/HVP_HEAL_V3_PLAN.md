@@ -44,12 +44,53 @@ hvp_v3:
 
 Joint mode can train the base model and hypothesis head together, but it is not the default because it has much higher memory pressure and may require AMP or gradient checkpointing.
 
+## Stage2 Evidence-aware Modality Adaptation
+
+Stage2 adapts non-m1 modalities with evidence-aware outputs. This is the first v3 step where m2/m3/m4 learn to expose standardized evidence in addition to the normal HEAL single-modality detection outputs:
+
+```text
+m2/m3/m4 input
+  -> modality encoder / backbone / aligner
+  -> pyramid backbone / shrink conv
+      -> original detection heads
+      -> HVP-v3 evidence head
+          -> evidence heatmap
+          -> evidence uncertainty
+          -> evidence descriptor
+```
+
+The official `heter_pyramid_single.py` remains unchanged. Stage2 uses `heter_pyramid_single_hvp_heal_v3` only when the yaml explicitly selects it and enables:
+
+```yaml
+hvp_v3:
+  enabled: true
+  stage: stage2_evidence
+  stage2:
+    train_mode: evidence_adaptation
+    use_hvp_v3_evidence: true
+  evidence_head:
+    enable: true
+  evidence_loss:
+    enable: true
+```
+
+The Stage2 objective augments the existing single-modality HEAL detection training with:
+
+```text
+L = L_single_det
+    + lambda_hmap * L_evidence_heatmap
+    + lambda_unc * L_uncertainty
+    + lambda_desc * L_descriptor
+```
+
+`L_evidence_heatmap` is BCE-with-logits against the anchor-positive map from `target_dict["pos_equal_one"]`. `L_uncertainty` is a foreground uncertainty penalty. `L_descriptor` is a lightweight descriptor smoothness regularizer until a later stage provides cross-modality descriptor targets. Existing depth and pyramid losses remain part of the normal HEAL Stage2 loss class.
+
 ## Why This Is Not v2.x Plug-in
 
 v2.x HVP-CBEA is an optional module inserted after a trained HEAL checkpoint and can be trained with `train_only_hvp=true`. v3 starts a new staged-training mainline:
 
 - Stage1: hypothesis-aware base training.
-- Stage2: not implemented in this skeleton.
+- Stage2: evidence-aware modality adaptation for m2/m3/m4.
 - Stage3: not implemented in this skeleton.
 - Packet and hybrid modes are not part of this Stage1 skeleton.
 
@@ -59,7 +100,9 @@ v2.x HVP-CBEA is an optional module inserted after a trained HEAL checkpoint and
 - The new wrapper calls the official HEAL collab forward unchanged when disabled.
 - Stage1 loss is added only when `output_dict["hvp_v3"]` exists and `aux_loss.enabled=true`.
 - No v2.x HVP-CBEA files or v1 HBEC files are removed.
-- No packet, hybrid, Stage2, or Stage3 logic is introduced.
+- Packet, hybrid, and Stage3 logic are still not introduced.
+- `hvp_v3.enabled=false` and old `heter_pyramid_single` configs keep the original HEAL path.
+- Stage2 checkpoint loading skips incompatible Stage1-only keys such as `hvp_v3_hypothesis_head`, `encoder_m1`, and `backbone_m1`.
 
 ## Stage1 Follow-up
 
@@ -75,3 +118,21 @@ model:
 ```
 
 The expected log fields are `HVP-v3 Loss` and `Stage1 Hypothesis Loss`.
+
+## Stage2 Follow-up
+
+The next server-side check should run:
+
+```bash
+python opencood/tools/check_hvp_heal_v3_stage2_smoke.py
+```
+
+Then launch the explicit v3 Stage2 yaml for the target modality, for example:
+
+```text
+opencood/hypes_yaml/HEAL_XLab_v3_HVP_HEAL/stage2/m2_evidence_adapt.yaml
+opencood/hypes_yaml/HEAL_XLab_v3_HVP_HEAL/stage2/m3_evidence_adapt.yaml
+opencood/hypes_yaml/HEAL_XLab_v3_HVP_HEAL/stage2/m4_evidence_adapt.yaml
+```
+
+A valid Stage2 training log should show `HVP-v3 Loss` and `Stage2 Evidence Loss`; a log with only Conf/Loc/Dir/Depth/Pyramid remains ordinary HEAL Stage2, not HVP-v3 Stage2.
