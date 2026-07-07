@@ -108,9 +108,9 @@ class PointPillarDepthLoss(PointPillarLoss):
         if hvp_v3_enabled:
             if hvp_v3_stage == "stage2_evidence":
                 log_msg += (
-                    " || HVP-v3 Loss: %.8f || Stage2 Evidence Loss: %.8f"
-                    " || Evidence Heatmap Loss: %.8f || Evidence Unc Loss: %.8f"
-                    " || Evidence Desc Loss: %.8f"
+                    " || HVP-v3 Loss: %.3e || Stage2 Evidence Loss: %.3e"
+                    " || Evidence Heatmap Loss: %.3e || Evidence Unc Loss: %.3e"
+                    " || Evidence Desc Loss: %.3e"
                 ) % (
                     hvp_v3_loss,
                     hvp_v3_stage2_loss,
@@ -119,7 +119,7 @@ class PointPillarDepthLoss(PointPillarLoss):
                     hvp_v3_stage2_descriptor_loss,
                 )
             else:
-                log_msg += " || HVP-v3 Loss: %.8f || Stage1 Hypothesis Loss: %.8f" % (
+                log_msg += " || HVP-v3 Loss: %.3e || Stage1 Hypothesis Loss: %.3e" % (
                     hvp_v3_loss,
                     hvp_v3_stage1_loss,
                 )
