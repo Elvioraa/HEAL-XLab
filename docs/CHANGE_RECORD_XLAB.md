@@ -927,3 +927,39 @@ Scope:
 - Only AP print formatting was changed.
 - AP calculation logic was not changed.
 - Inference/model/HBEC logic was not changed.
+
+## HVP-CBEA-v3 Stage3 collaborative hypothesis-evidence aggregation
+
+Base hash: `972582f`
+
+### Motivation
+
+- Server Stage1 and Stage2 checkpoints are ready.
+- Stage3 yaml was missing, so collaborative HVP-CBEA aggregation training could not be launched from the staged checkpoints.
+- Stage3 should train the feature-level CBEA aggregator, not packet mode.
+
+### Implementation
+
+- `opencood/hypes_yaml/HEAL_XLab_v3_HVP_HEAL/stage3/cbea_aggregator.yaml`
+  - Adds the Stage3 training template.
+  - Uses `core_method: heter_pyramid_collab_hvp_cbea`.
+  - Enables `hvp_cbea.enabled=true`.
+  - Keeps `hvp_cbea.packet.enabled=false`.
+  - Enables `train_only_hvp=true` so inherited HEAL parameters and non-HVP BN buffers stay frozen.
+  - Enables HVP-CBEA auxiliary losses for hypothesis heatmap, residual focus, alpha regularization, and residual regularization.
+- `opencood/tools/prepare_hvp_cbea_stage3.py`
+  - Prepares `opencood/logs/HVP_CBEA_v3/stage3/cbea_aggregator/net_epoch1.pth` from Stage1 m1 and Stage2 m2/m3/m4 best checkpoints.
+  - Missing HVP-CBEA module keys are expected and random-initialized by Stage3 model construction.
+- `opencood/tools/check_hvp_cbea_stage3_smoke.py`
+  - Checks yaml loading, dummy Stage3 model creation, packet disabled, forward, loss, backward, and HVP-only gradients.
+- `docs/HVP_HEAL_V3_PLAN.md`
+- `docs/HVP_HEAL_V3_CONFIG_SCHEMA.md`
+- `docs/HVP_CBEA_CONFIG_SCHEMA.md`
+  - Document Stage3 config and checkpoint preparation.
+
+### Safety
+
+- No `logs/` files are modified by this patch.
+- Official HEAL `heter_pyramid_collab.py` is not modified.
+- Stage1 and Stage2 smoke paths remain unchanged.
+- Packet mode remains disabled in the Stage3 yaml.

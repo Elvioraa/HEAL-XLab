@@ -136,3 +136,56 @@ opencood/hypes_yaml/HEAL_XLab_v3_HVP_HEAL/stage2/m4_evidence_adapt.yaml
 ```
 
 A valid Stage2 training log should show `HVP-v3 Loss` and `Stage2 Evidence Loss`; a log with only Conf/Loc/Dir/Depth/Pyramid remains ordinary HEAL Stage2, not HVP-v3 Stage2.
+
+## Stage3 Collaborative Hypothesis-Evidence Aggregation
+
+Stage3 trains the feature-level HVP-CBEA collaborative aggregator from the Stage1/Stage2 HEAL checkpoints:
+
+```text
+HEAL intermediate fusion
+  -> fused BEV feature
+  -> HVP-CBEA hypothesis verification
+  -> Bayesian evidence aggregation
+  -> residual feature refinement
+  -> enhanced fused BEV feature
+  -> detection head
+```
+
+This is not packet mode. The Stage3 yaml explicitly keeps:
+
+```yaml
+hvp_cbea:
+  enabled: true
+  packet:
+    enabled: false
+```
+
+The Stage3 loss is the normal detection/depth loss plus HVP-CBEA auxiliary terms:
+
+```text
+L_stage3 = L_det
+           + lambda_hmap * L_hypothesis_heatmap
+           + lambda_focus * L_residual_focus
+           + lambda_alpha * L_alpha_reg
+           + lambda_res * L_residual_reg
+```
+
+The template is:
+
+```text
+opencood/hypes_yaml/HEAL_XLab_v3_HVP_HEAL/stage3/cbea_aggregator.yaml
+```
+
+Before training, prepare the Stage3 resume checkpoint on the server:
+
+```bash
+python opencood/tools/prepare_hvp_cbea_stage3.py
+```
+
+The script merges Stage1 m1 and Stage2 m2/m3/m4 best checkpoints into:
+
+```text
+opencood/logs/HVP_CBEA_v3/stage3/cbea_aggregator/net_epoch1.pth
+```
+
+HVP-CBEA module keys are intentionally absent from the merged checkpoint and are randomly initialized by `strict=False` checkpoint loading.

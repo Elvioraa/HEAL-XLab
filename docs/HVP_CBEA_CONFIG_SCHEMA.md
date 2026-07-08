@@ -286,3 +286,49 @@ packet:
 ```
 
 When `packet.enabled: false`, HVP-CBEA uses the v2.5 feature path unchanged. When `packet.enabled: true`, collaborator features are only used inside the local packetizer to produce compact hypothesis/evidence packets; the ego-side packet aggregator receives packets, not dense collaborator BEV features.
+
+## v3 Stage3 Feature-level CBEA Aggregator
+
+Stage3 uses the feature-level HVP-CBEA path, not packet mode:
+
+```yaml
+model:
+  core_method: heter_pyramid_collab_hvp_cbea
+  args:
+    hvp_cbea:
+      enabled: true
+      train_only_hvp: true
+      packet:
+        enabled: false
+      aux_loss:
+        enabled: true
+        residual_reg:
+          enabled: true
+          weight: 0.001
+        alpha_reg:
+          enabled: true
+          weight: 0.001
+          target: 0.05
+        gt_guided:
+          enabled: true
+          hypothesis_heatmap:
+            enabled: true
+            weight: 0.05
+          residual_focus:
+            enabled: true
+            weight: 0.01
+```
+
+The Stage3 template is:
+
+```text
+opencood/hypes_yaml/HEAL_XLab_v3_HVP_HEAL/stage3/cbea_aggregator.yaml
+```
+
+Prepare the Stage3 initial checkpoint with:
+
+```bash
+python opencood/tools/prepare_hvp_cbea_stage3.py
+```
+
+The merged checkpoint intentionally lacks HVP-CBEA module keys; those modules are initialized by the Stage3 model and remain trainable.

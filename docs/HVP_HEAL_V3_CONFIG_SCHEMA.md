@@ -137,6 +137,65 @@ Checkpoint compatibility:
 - Stage1 checkpoints with extra `hvp_v3_hypothesis_head`, `encoder_m1`, or `backbone_m1` keys are filtered by the Stage2 wrapper.
 - The official `heter_pyramid_single.py` and Stage1 wrapper are unchanged by Stage2 configs.
 
+## Stage3 Collaborative Hypothesis-Evidence Aggregation
+
+Reference config:
+
+```yaml
+model:
+  core_method: heter_pyramid_collab_hvp_cbea
+  args:
+    hvp_cbea:
+      enabled: true
+      train_only_hvp: true
+      fallback_on_error: true
+      residual_gate:
+        enabled: true
+        alpha_init: 0.05
+        alpha_max: 0.3
+        learnable: true
+        collaboration_aware:
+          enabled: true
+          no_collab_scale: 0.0
+          collab_scale: 1.0
+          min_cav: 2
+      packet:
+        enabled: false
+      aux_loss:
+        enabled: true
+        residual_reg:
+          enabled: true
+          weight: 0.001
+        alpha_reg:
+          enabled: true
+          weight: 0.001
+          target: 0.05
+        gt_guided:
+          enabled: true
+          hypothesis_heatmap:
+            enabled: true
+            weight: 0.05
+          residual_focus:
+            enabled: true
+            weight: 0.01
+```
+
+`train_only_hvp: true` freezes inherited HEAL parameters and keeps non-HVP HEAL BatchNorm buffers in eval mode while the HVP-CBEA modules remain trainable. The packet branch is explicitly disabled; Stage3 is the feature-level collaborative aggregation path.
+
+Checkpoint preparation:
+
+```bash
+python opencood/tools/prepare_hvp_cbea_stage3.py
+```
+
+This prepares:
+
+```text
+opencood/logs/HVP_CBEA_v3/stage3/cbea_aggregator/net_epoch1.pth
+```
+
+from the Stage1 m1 and Stage2 m2/m3/m4 best checkpoints. Missing HVP-CBEA keys are expected and are initialized randomly during model construction.
+
 ## Template Path
 
 ```text
@@ -144,4 +203,5 @@ opencood/hypes_yaml/HEAL_XLab_v3_HVP_HEAL/stage1/m1_hyp_base.yaml
 opencood/hypes_yaml/HEAL_XLab_v3_HVP_HEAL/stage2/m2_evidence_adapt.yaml
 opencood/hypes_yaml/HEAL_XLab_v3_HVP_HEAL/stage2/m3_evidence_adapt.yaml
 opencood/hypes_yaml/HEAL_XLab_v3_HVP_HEAL/stage2/m4_evidence_adapt.yaml
+opencood/hypes_yaml/HEAL_XLab_v3_HVP_HEAL/stage3/cbea_aggregator.yaml
 ```
