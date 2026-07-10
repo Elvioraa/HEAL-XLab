@@ -1,11 +1,13 @@
 """Smoke test for PACT-CBEA v1 Feature Mode."""
 
+import argparse
 import os
 import sys
 import types
 
 import torch
 import torch.nn as nn
+from torch.utils.data import DataLoader
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if REPO_ROOT not in sys.path:
@@ -56,6 +58,9 @@ from opencood.loss.point_pillar_pyramid_loss import PointPillarPyramidLoss
 from opencood.models.heter_pyramid_collab_pact_cbea import (
     HeterPyramidCollabPactCbea,
 )
+from opencood.models.heter_pyramid_collab_pact_cbea_stage1 import (
+    HeterPyramidCollabPactCbeaStage1,
+)
 from opencood.models.heter_pyramid_single_pact_cbea import (
     HeterPyramidSinglePactCbea,
 )
@@ -73,8 +78,16 @@ PACT_YAML = os.path.join(
     "pact",
     "cbea_rule.yaml",
 )
-LOCAL_YAMLS = {
-    "m1": os.path.join(REPO_ROOT, "opencood", "hypes_yaml", "HEAL_XLab_v3_HVP_HEAL", "pact", "stage1", "m1_local_evidence.yaml"),
+STAGE1_YAML = os.path.join(
+    REPO_ROOT,
+    "opencood",
+    "hypes_yaml",
+    "HEAL_XLab_v3_HVP_HEAL",
+    "pact",
+    "stage1",
+    "m1_local_evidence.yaml",
+)
+STAGE2_LOCAL_YAMLS = {
     "m2": os.path.join(REPO_ROOT, "opencood", "hypes_yaml", "HEAL_XLab_v3_HVP_HEAL", "pact", "stage2", "m2_local_evidence_adapt.yaml"),
     "m3": os.path.join(REPO_ROOT, "opencood", "hypes_yaml", "HEAL_XLab_v3_HVP_HEAL", "pact", "stage2", "m3_local_evidence_adapt.yaml"),
     "m4": os.path.join(REPO_ROOT, "opencood", "hypes_yaml", "HEAL_XLab_v3_HVP_HEAL", "pact", "stage2", "m4_local_evidence_adapt.yaml"),
@@ -128,6 +141,7 @@ class _DummyPyramid(nn.Module):
 
 
 def main():
+    options = _parse_args()
     torch.manual_seed(71)
     pact_hypes = yaml_utils.load_yaml(PACT_YAML)
     pact_cfg = pact_hypes["model"]["args"]["pact_cbea"]
@@ -143,10 +157,21 @@ def main():
     _check_modality_prior(pact_cfg)
     _check_multi_scene_rule(rule)
 
-    local_param_count = 0
-    for modality_name, yaml_path in LOCAL_YAMLS.items():
+    stage1_hypes = yaml_utils.load_yaml(STAGE1_YAML)
+    _assert_stage1_yaml(stage1_hypes)
+    stage1_model = _build_dummy_stage1_model(
+        stage1_hypes["model"]["args"]["pact_cbea"]
+    )
+    stage1_output = stage1_model(_dummy_stage1_data())
+    _assert_stage1_output(stage1_output)
+    _check_stage1_trainability_and_backward(stage1_model, stage1_output)
+    local_param_count = _local_head_param_count(stage1_model, "m1")
+    print("PACT-CBEA Stage1 collab forward/loss/backward OK")
+    _check_real_stage1_batch(STAGE1_YAML, options.require_real_stage1)
+
+    for modality_name, yaml_path in STAGE2_LOCAL_YAMLS.items():
         hypes = yaml_utils.load_yaml(yaml_path)
-        _assert_local_yaml(hypes, modality_name)
+        _assert_stage2_local_yaml(hypes, modality_name)
         model = _build_dummy_single_model(modality_name, hypes["model"]["args"]["pact_cbea"])
         output_dict = model(_dummy_single_data(modality_name))
         _assert_local_evidence_output(output_dict, modality_name)
@@ -166,6 +191,7 @@ def main():
 
     print("PACT-CBEA yaml load OK")
     print("PACT-CBEA Stage1 local expert create OK")
+    print("PACT-CBEA Stage1 base train modules OK")
     print("PACT-CBEA Stage2 local expert create OK")
     print("PACT-CBEA local evidence output OK")
     print("PACT-CBEA model create OK")
@@ -186,6 +212,16 @@ def main():
     print("PACT-CBEA smoke OK")
 
 
+def _parse_args():
+    parser = argparse.ArgumentParser(description="PACT-CBEA v1 smoke checks")
+    parser.add_argument(
+        "--require-real-stage1",
+        action="store_true",
+        help="fail instead of skipping when the local OPV2V Stage1 dataset is unavailable",
+    )
+    return parser.parse_args()
+
+
 def _assert_pact_yaml(hypes, pact_cfg):
     assert hypes["name"] == "PACT_CBEA_v1/rule_cbea"
     assert hypes["model"]["core_method"] == "heter_pyramid_collab_pact_cbea"
@@ -197,7 +233,22 @@ def _assert_pact_yaml(hypes, pact_cfg):
     assert pact_cfg["evidence_head"]["enabled"] is True
 
 
-def _assert_local_yaml(hypes, modality_name):
+def _assert_stage1_yaml(hypes):
+    assert hypes["name"] == "PACT_CBEA_v1/stage1/m1_base"
+    assert hypes["fusion"]["core_method"] == "intermediateheter"
+    assert hypes["model"]["core_method"] == "heter_pyramid_collab_pact_cbea_stage1"
+    cfg = hypes["model"]["args"]["pact_cbea"]
+    assert cfg["enabled"] is True
+    assert cfg["stage"] == "stage1_local_evidence"
+    assert cfg["trainable"] is True
+    assert cfg["no_joint_training"] is True
+    assert cfg["use_stage3_joint_training"] is False
+    assert cfg["local_evidence"]["train_mode"] == "stage1_base_train"
+    assert cfg["local_evidence"]["enabled"] is True
+    assert cfg["evidence_head"]["enabled"] is True
+
+
+def _assert_stage2_local_yaml(hypes, modality_name):
     assert hypes["model"]["core_method"] == "heter_pyramid_single_pact_cbea"
     assert hypes["name"].startswith("PACT_CBEA_v1/")
     cfg = hypes["model"]["args"]["pact_cbea"]
@@ -209,6 +260,161 @@ def _assert_local_yaml(hypes, modality_name):
     assert cfg["local_evidence"]["enabled"] is True
     assert cfg["evidence_loss"]["descriptor"].get("enabled", cfg["evidence_loss"]["descriptor"].get("enable")) is False
     assert modality_name in hypes["name"]
+
+
+def _build_dummy_stage1_model(pact_cfg):
+    modality_name = "m1"
+    model = HeterPyramidCollabPactCbeaStage1.__new__(
+        HeterPyramidCollabPactCbeaStage1
+    )
+    nn.Module.__init__(model)
+    model.modality_name_list = [modality_name]
+    model.sensor_type_dict = {modality_name: "lidar"}
+    model.cam_crop_info = {}
+    model.H = 8
+    model.W = 8
+    model.fake_voxel_size = 1
+    model.compress = False
+    model.shrink_flag = True
+    setattr(model, "encoder_m1", _DummyEncoder())
+    setattr(model, "backbone_m1", _DummyBackbone())
+    setattr(model, "aligner_m1", _DummyAligner())
+    setattr(model, "depth_supervision_m1", False)
+    model.pyramid_backbone = _DummyPyramid()
+    model.shrink_conv = nn.Conv2d(64, 64, kernel_size=1)
+    model.cls_head = nn.Conv2d(64, 2, kernel_size=1)
+    model.reg_head = nn.Conv2d(64, 14, kernel_size=1)
+    model.dir_head = nn.Conv2d(64, 4, kernel_size=1)
+    model.pact_cbea_cfg = HeterPyramidCollabPactCbeaStage1._normalize_pact_stage1_cfg({
+        **pact_cfg,
+        "evidence_head": {
+            **pact_cfg["evidence_head"],
+            "in_channels": 64,
+            "hidden_dim": 16,
+            "descriptor_dim": 8,
+        },
+    })
+    model.pact_cbea_enabled = bool(model.pact_cbea_cfg["enabled"])
+    model.pact_cbea_rule = PACTCBEARule(model.pact_cbea_cfg)
+    model._pact_stage1_modality = modality_name
+    model.pact_cbea_evidence_head_m1 = PACTCBEALocalEvidenceHead(
+        in_channels=64,
+        hidden_dim=16,
+        descriptor_dim=8,
+        use_sigmoid=True,
+        normalize_descriptor=True,
+    )
+    model.train()
+    return model
+
+
+def _assert_stage1_output(output_dict):
+    assert output_dict["pyramid"] == "collab"
+    assert output_dict["cls_preds"].shape == (1, 2, 16, 16)
+    assert output_dict["reg_preds"].shape == (1, 14, 16, 16)
+    assert output_dict["dir_preds"].shape == (1, 4, 16, 16)
+    pact = output_dict["pact_cbea"]
+    assert pact["stage"] == "local_evidence"
+    assert pact["train_mode"] == "stage1_base_train"
+    assert pact["global_rule_trainable"] is False
+    assert pact["evidence_heatmap_logits"].shape == (1, 1, 16, 16)
+    assert pact["evidence_uncertainty"].shape == (1, 1, 16, 16)
+
+
+def _check_stage1_trainability_and_backward(model, output_dict):
+    expected_modules = (
+        "encoder_m1",
+        "backbone_m1",
+        "pyramid_backbone",
+        "shrink_conv",
+        "cls_head",
+        "reg_head",
+        "dir_head",
+        "pact_cbea_evidence_head_m1",
+    )
+    for module_name in expected_modules:
+        module = getattr(model, module_name)
+        assert any(param.requires_grad for param in module.parameters()), module_name
+    assert _trainable_count(model.pact_cbea_rule) == 0
+
+    criterion = PointPillarPyramidLoss(_loss_args())
+    total_loss = criterion(output_dict, _dummy_target())
+    assert torch.isfinite(total_loss)
+    assert criterion.loss_dict["pact_cbea_local_evidence_enabled"] is True
+    assert criterion.loss_dict["pact_cbea_local_evidence_loss"] > 0.0
+    total_loss.backward()
+    for module_name in expected_modules:
+        module = getattr(model, module_name)
+        assert any(
+            param.grad is not None
+            and torch.isfinite(param.grad).all()
+            and param.grad.abs().sum() > 0
+            for param in module.parameters()
+        ), module_name
+
+
+def _check_real_stage1_batch(yaml_path, required):
+    hypes = yaml_utils.load_yaml(yaml_path)
+    paths = [
+        _resolve_repo_path(hypes["root_dir"]),
+        _resolve_repo_path(hypes["validate_dir"]),
+        _resolve_repo_path(hypes["heter"].get("assignment_path")),
+    ]
+    missing_paths = [path for path in paths if not path or not os.path.exists(path)]
+    if missing_paths:
+        message = "PACT-CBEA Stage1 real DataLoader batch smoke skipped; missing: %s" % (
+            ", ".join(missing_paths)
+        )
+        if required:
+            raise RuntimeError(message)
+        print(message)
+        return False
+
+    from opencood.data_utils.datasets import build_dataset
+    from opencood.tools import train_utils
+
+    train_dataset = build_dataset(hypes, visualize=False, train=True)
+    validate_dataset = build_dataset(hypes, visualize=False, train=False)
+    assert len(train_dataset) == 6374, len(train_dataset)
+    assert len(validate_dataset) == 1980, len(validate_dataset)
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=1,
+        num_workers=0,
+        collate_fn=train_dataset.collate_batch_train,
+        shuffle=False,
+    )
+    batch_data = next(iter(train_loader))
+    assert batch_data is not None and "ego" in batch_data
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = train_utils.create_model(hypes).to(device)
+    criterion = train_utils.create_loss(hypes)
+    model.train()
+    model.model_train_init()
+    batch_data = train_utils.to_device(batch_data, device)
+    output_dict = model(batch_data["ego"])
+    total_loss = criterion(output_dict, batch_data["ego"]["label_dict"])
+    assert torch.isfinite(total_loss)
+    total_loss.backward()
+    head = model.pact_cbea_evidence_head_m1
+    assert any(
+        param.grad is not None
+        and torch.isfinite(param.grad).all()
+        and param.grad.abs().sum() > 0
+        for param in head.parameters()
+    )
+    print(
+        "PACT-CBEA Stage1 real DataLoader batch forward/loss/backward OK "
+        "(train=%d validate=%d)" % (len(train_dataset), len(validate_dataset))
+    )
+    return True
+
+
+def _resolve_repo_path(path):
+    if not path:
+        return ""
+    return path if os.path.isabs(path) else os.path.join(REPO_ROOT, path)
 
 
 def _check_fallback_aggregation(rule):
@@ -495,6 +701,17 @@ def _check_missing_evidence_fallback(pact_cfg):
 def _dummy_single_data(modality_name):
     return {
         f"inputs_{modality_name}": {
+            "feature": torch.randn(1, 64, 16, 16),
+        },
+    }
+
+
+def _dummy_stage1_data():
+    return {
+        "agent_modality_list": ["m1"],
+        "record_len": torch.tensor([1]),
+        "pairwise_t_matrix": torch.eye(4).view(1, 1, 1, 4, 4),
+        "inputs_m1": {
             "feature": torch.randn(1, 64, 16, 16),
         },
     }

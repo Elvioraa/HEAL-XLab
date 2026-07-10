@@ -38,7 +38,7 @@ heter:
         cav_lidar_range: *cav_lidar
 
 fusion:
-  core_method: 'lateheter'
+  core_method: 'intermediateheter'
   dataset: 'opv2v'
   args:
     proj_first: false
@@ -78,19 +78,18 @@ postprocess:
     anchor_yaw: *anchor_yaw
 
 model:
-  core_method: heter_pyramid_single_pact_cbea
+  core_method: heter_pyramid_collab_pact_cbea_stage1
   args:
     lidar_range: *cav_lidar
-    fix_encoder: false
     pact_cbea:
       enabled: true
-      stage: local_evidence
+      stage: stage1_local_evidence
       trainable: true
       no_joint_training: true
       use_stage3_joint_training: false
       local_evidence:
         enabled: true
-        train_mode: local_evidence
+        train_mode: stage1_base_train
       evidence_head:
         enabled: true
         in_channels: 256
