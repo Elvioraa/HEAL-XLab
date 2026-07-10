@@ -18,14 +18,15 @@ class PACTCBEARule(nn.Module):
         self.uncertainty_max = float(clamp[1])
 
     def forward(self, features, evidence_heatmap=None, evidence_uncertainty=None,
-                record_len=None, pairwise_t_matrix=None, modality_names=None,
-                modality_ids=None):
+                evidence_descriptor=None, record_len=None, pairwise_t_matrix=None,
+                modality_names=None, modality_ids=None):
         feature_tensor, input_layout = self._feature_tensor(features)
         if feature_tensor.ndim == 4:
             return self._forward_flat(
                 feature_tensor,
                 evidence_heatmap,
                 evidence_uncertainty,
+                evidence_descriptor,
                 record_len,
                 pairwise_t_matrix,
                 modality_names,
@@ -36,6 +37,7 @@ class PACTCBEARule(nn.Module):
             feature_tensor,
             evidence_heatmap,
             evidence_uncertainty,
+            evidence_descriptor,
             pairwise_t_matrix,
             modality_names,
             modality_ids,
@@ -43,14 +45,15 @@ class PACTCBEARule(nn.Module):
         )
 
     def _forward_flat(self, feature_tensor, evidence_heatmap, evidence_uncertainty,
-                      record_len, pairwise_t_matrix, modality_names, modality_ids,
-                      input_layout):
+                      evidence_descriptor, record_len, pairwise_t_matrix,
+                      modality_names, modality_ids, input_layout):
         record_list = self._record_list(record_len, int(feature_tensor.shape[0]))
         if len(record_list) == 1:
             return self._aggregate_dense(
                 feature_tensor.unsqueeze(0),
                 evidence_heatmap,
                 evidence_uncertainty,
+                evidence_descriptor,
                 pairwise_t_matrix,
                 modality_names,
                 modality_ids,
@@ -66,10 +69,12 @@ class PACTCBEARule(nn.Module):
             group_ids = self._slice_names(modality_ids, start, end)
             group_hmap = self._slice_evidence(evidence_heatmap, start, end)
             group_unc = self._slice_evidence(evidence_uncertainty, start, end)
+            group_desc = self._slice_evidence(evidence_descriptor, start, end)
             enhanced, debug = self._aggregate_dense(
                 feature_tensor[start:end].unsqueeze(0),
                 group_hmap,
                 group_unc,
+                group_desc,
                 pairwise_t_matrix,
                 group_modalities,
                 group_ids,
@@ -81,7 +86,7 @@ class PACTCBEARule(nn.Module):
         return torch.stack(outputs, dim=0), self._merge_group_debug(debug_items)
 
     def _aggregate_dense(self, feature_tensor, evidence_heatmap, evidence_uncertainty,
-                         pairwise_t_matrix, modality_names, modality_ids,
+                         evidence_descriptor, pairwise_t_matrix, modality_names, modality_ids,
                          input_layout):
         if feature_tensor.ndim != 5:
             raise ValueError("PACT-CBEA features must be [N,C,H,W] or [B,N,C,H,W]")
@@ -120,6 +125,8 @@ class PACTCBEARule(nn.Module):
             fallbacks,
         )
         spatial_weight = self._spatial_weight(
+            evidence_heatmap,
+            confidence,
             pairwise_t_matrix,
             batch_size,
             agent_count,
@@ -130,6 +137,7 @@ class PACTCBEARule(nn.Module):
             fallbacks,
         )
         descriptor_weight = self._descriptor_weight(
+            evidence_descriptor,
             batch_size,
             agent_count,
             height,
@@ -198,26 +206,50 @@ class PACTCBEARule(nn.Module):
         weight = torch.exp(-uncertainty)
         return weight ** float(self.cfg["weights"].get("uncertainty", 1.0))
 
-    def _spatial_weight(self, pairwise_t_matrix, batch_size, agent_count, height,
-                        width, device, dtype, fallbacks):
+    def _spatial_weight(self, evidence_heatmap, confidence, pairwise_t_matrix,
+                        batch_size, agent_count, height, width, device, dtype,
+                        fallbacks):
         if not self.cfg["aggregation"].get("spatial_consistency", True):
             fallbacks.append("spatial_consistency_disabled")
             return torch.ones(batch_size, agent_count, 1, height, width, device=device, dtype=dtype)
-        # The first increment keeps a safe HEAL-compatible fallback. Pose-aware
-        # spatial evidence can plug in here without changing the public API.
+        if evidence_heatmap is None:
+            fallbacks.append("missing_evidence_heatmap_spatial_ones")
+            return torch.ones(batch_size, agent_count, 1, height, width, device=device, dtype=dtype)
+        if agent_count <= 1:
+            fallbacks.append("single_agent_spatial_ones")
+            return torch.ones(batch_size, agent_count, 1, height, width, device=device, dtype=dtype)
         if pairwise_t_matrix is None:
-            fallbacks.append("missing_pairwise_t_matrix_spatial_ones")
-        else:
-            fallbacks.append("spatial_consistency_basic_ones")
-        return torch.ones(batch_size, agent_count, 1, height, width, device=device, dtype=dtype)
+            fallbacks.append("missing_pairwise_t_matrix_spatial_evidence_only")
+        ego_confidence = confidence[:, :1]
+        diff = torch.abs(confidence - ego_confidence)
+        temperature = float(self.cfg.get("spatial_temperature", 1.0))
+        weight = torch.exp(-torch.clamp(diff * temperature, min=0.0, max=20.0))
+        fallbacks.append("spatial_consistency_evidence_ego_diff")
+        return weight ** float(self.cfg["weights"].get("spatial", 1.0))
 
-    def _descriptor_weight(self, batch_size, agent_count, height, width, device,
-                           dtype, fallbacks):
-        if self.cfg["aggregation"].get("descriptor_consistency", False):
-            fallbacks.append("descriptor_consistency_fallback_ones")
-        else:
+    def _descriptor_weight(self, evidence_descriptor, batch_size, agent_count,
+                           height, width, device, dtype, fallbacks):
+        if not self.cfg["aggregation"].get("descriptor_consistency", False):
             fallbacks.append("descriptor_consistency_disabled")
-        return torch.ones(batch_size, agent_count, 1, height, width, device=device, dtype=dtype)
+            return torch.ones(batch_size, agent_count, 1, height, width, device=device, dtype=dtype)
+        if evidence_descriptor is None:
+            fallbacks.append("missing_evidence_descriptor_descriptor_ones")
+            return torch.ones(batch_size, agent_count, 1, height, width, device=device, dtype=dtype)
+        descriptor = self._descriptor_tensor(
+            evidence_descriptor,
+            batch_size,
+            agent_count,
+            height,
+            width,
+            device,
+            dtype,
+            fallbacks,
+        )
+        ego_descriptor = descriptor[:, :1]
+        distance = torch.mean(torch.abs(descriptor - ego_descriptor), dim=2, keepdim=True)
+        temperature = float(self.cfg.get("descriptor_temperature", 1.0))
+        weight = torch.exp(-torch.clamp(distance * temperature, min=0.0, max=20.0))
+        return weight ** float(self.cfg["weights"].get("descriptor", 1.0))
 
     def _modality_prior(self, modality_names, modality_ids, batch_size, agent_count,
                         device, dtype, fallbacks):
@@ -277,6 +309,35 @@ class PACTCBEARule(nn.Module):
             fallbacks.append("%s_shape_mismatch_ones" % name)
             return torch.ones(batch_size, agent_count, 1, height, width, device=device, dtype=dtype)
         return tensor
+
+    def _descriptor_tensor(self, value, batch_size, agent_count, height, width,
+                           device, dtype, fallbacks):
+        tensor, layout = self._to_tensor(value, device=device, dtype=dtype)
+        if tensor.ndim == 4:
+            if tensor.shape[0] == agent_count:
+                tensor = tensor.unsqueeze(0)
+            elif tensor.shape[0] == batch_size:
+                tensor = tensor.unsqueeze(1)
+            else:
+                tensor = tensor.unsqueeze(0)
+        elif tensor.ndim != 5:
+            fallbacks.append("evidence_descriptor_invalid_layout_%s_ones" % layout)
+            return torch.zeros(batch_size, agent_count, 1, height, width, device=device, dtype=dtype)
+        if tensor.shape[0] == 1 and batch_size > 1:
+            tensor = tensor.expand(batch_size, -1, -1, -1, -1)
+        if tensor.shape[1] == 1 and agent_count > 1:
+            tensor = tensor.expand(-1, agent_count, -1, -1, -1)
+        if tensor.shape[-2:] != (height, width):
+            channels = tensor.shape[2]
+            tensor = F.interpolate(
+                tensor.reshape(tensor.shape[0] * tensor.shape[1], channels, tensor.shape[-2], tensor.shape[-1]),
+                size=(height, width),
+                mode="nearest",
+            ).view(tensor.shape[0], tensor.shape[1], channels, height, width)
+        if tensor.shape[:2] != (batch_size, agent_count):
+            fallbacks.append("evidence_descriptor_shape_mismatch_zeros")
+            return torch.zeros(batch_size, agent_count, 1, height, width, device=device, dtype=dtype)
+        return F.normalize(tensor.float(), p=2, dim=2, eps=self.eps).to(dtype=dtype)
 
     def _feature_tensor(self, features):
         tensor, layout = self._to_tensor(features)
@@ -367,6 +428,20 @@ class PACTCBEARule(nn.Module):
         }
         for item in debug_items:
             merged["pact_fallbacks"].extend(item.get("pact_fallbacks", []))
+        for key in (
+            "pact_alpha",
+            "pact_reliability",
+            "pact_evidence_confidence",
+            "pact_uncertainty_weight",
+            "pact_modality_prior",
+            "pact_spatial_weight",
+            "pact_descriptor_weight",
+        ):
+            values = [item.get(key) for item in debug_items]
+            if all(torch.is_tensor(value) for value in values):
+                shapes = [tuple(value.shape[1:]) for value in values]
+                if all(shape == shapes[0] for shape in shapes):
+                    merged[key] = torch.cat(values, dim=0)
         if len(debug_items) == 1:
             merged.update(debug_items[0])
         return merged
@@ -405,6 +480,8 @@ class PACTCBEARule(nn.Module):
             "plug_and_play": True,
             "eps": 1e-6,
             "uncertainty_clamp": [-10.0, 10.0],
+            "spatial_temperature": 1.0,
+            "descriptor_temperature": 1.0,
             "aggregation": {
                 "evidence_confidence": True,
                 "uncertainty_weight": True,

@@ -15,36 +15,65 @@ PACT-CBEA has a different deployment-oriented goal:
 - No retraining old expert branches when a new vehicle or modality joins.
 - Local expert checkpoint composition plus fixed trust-calibrated evidence routing.
 
-## PACT-CBEA v1
+## PACT-CBEA v1 Feature Mode
 
-The first increment implements `PACT_CBEA_v1/rule_cbea`:
+The second increment makes `PACT_CBEA_v1` a formally trainable Feature Mode.
+It still transmits BEV feature tensors in the collaborative path; packet-only
+communication is a later, separate experiment.
 
 ```text
-local expert branches
-  -> per-agent BEV/evidence
+PACT local expert training
+  -> m1/m2/m3/m4 local BEV feature
+  -> local evidence heatmap logits
+  -> local uncertainty / log-variance proxy
+
+PACT collaborative inference
+  -> per-agent BEV feature + evidence + uncertainty
+  -> warp all three tensors to ego coordinates
   -> parameter-free trust-calibrated rule
   -> enhanced collaborative feature
   -> existing HEAL detection heads
 ```
+
+Local evidence heads are trainable inside their own expert branches:
+
+- `PACT_CBEA_v1/stage1/m1_base`
+- `PACT_CBEA_v1/stage2/m2_alignto_m1`
+- `PACT_CBEA_v1/stage2/m3_alignto_m1`
+- `PACT_CBEA_v1/stage2/m4_alignto_m1`
+
+There is no centralized Stage3 training and no trainable global PACT
+aggregator. The global rule remains parameter-free.
 
 The rule computes:
 
 ```text
 evidence_confidence = sigmoid(evidence_heatmap)
 uncertainty_weight = exp(-evidence_uncertainty)
-reliability = evidence_confidence * uncertainty_weight * modality_prior
+spatial_consistency = exp(-abs(agent_evidence_confidence - ego_evidence_confidence))
+reliability =
+  evidence_confidence
+  * uncertainty_weight
+  * spatial_consistency
+  * modality_prior
 alpha = reliability / sum(reliability)
 enhanced_feature = sum_i alpha_i * feature_i
 ```
 
-If evidence is unavailable, PACT-CBEA falls back safely:
+The current main experiment keeps modality priors neutral:
 
-- Missing evidence heatmap -> confidence is 1.
-- Missing uncertainty -> uncertainty weight is 1.
-- Missing modality names -> modality prior is 1.
-- Only features available -> uniform average.
+```yaml
+modality_prior:
+  m1: 1.0
+  m2: 1.0
+  m3: 1.0
+  m4: 1.0
+```
 
-Every fallback is recorded in `output_dict["pact_cbea"]`.
+If local evidence is unavailable in the collaborative wrapper, PACT-CBEA does
+not average unaligned raw agent features. It falls back to the HEAL base
+collaborative feature or the ego-only path, and records the fallback in
+`output_dict["pact_cbea"]`.
 
 ## Plug-and-play Onboarding
 
@@ -61,7 +90,10 @@ No old branch retraining and no global aggregator retraining are required.
 
 Packet mode is a future communication interface enhancement. It can later carry compact evidence across agents or vendors.
 
-The current PACT-CBEA increment does not implement packet mode. Its focus is restoring the HEAL no-joint-training and plug-and-play paradigm with a rule-based feature/evidence routing scaffold.
+The current PACT-CBEA increment does not implement packet mode. Its focus is
+the HEAL no-joint-training and plug-and-play paradigm with feature-level
+evidence routing. Feature, evidence, and uncertainty maps must all be warped
+to the ego coordinate system before rule aggregation.
 
 ## Relation To HVP_CBEA_v3
 
@@ -73,7 +105,13 @@ PACT-CBEA reuses the staged local expert checkpoints but removes the centralized
 ## Files
 
 - `opencood/models/sub_modules/pact_cbea_rule.py`
+- `opencood/models/sub_modules/pact_cbea_evidence_head.py`
+- `opencood/models/heter_pyramid_single_pact_cbea.py`
 - `opencood/models/heter_pyramid_collab_pact_cbea.py`
+- `opencood/hypes_yaml/HEAL_XLab_v3_HVP_HEAL/pact/stage1/m1_local_evidence.yaml`
+- `opencood/hypes_yaml/HEAL_XLab_v3_HVP_HEAL/pact/stage2/m2_local_evidence_adapt.yaml`
+- `opencood/hypes_yaml/HEAL_XLab_v3_HVP_HEAL/pact/stage2/m3_local_evidence_adapt.yaml`
+- `opencood/hypes_yaml/HEAL_XLab_v3_HVP_HEAL/pact/stage2/m4_local_evidence_adapt.yaml`
 - `opencood/hypes_yaml/HEAL_XLab_v3_HVP_HEAL/pact/cbea_rule.yaml`
 - `opencood/tools/prepare_pact_cbea.py`
 - `opencood/tools/check_pact_cbea_smoke.py`
@@ -93,20 +131,26 @@ opencood/logs/PACT_CBEA_v1/rule_cbea/net_epoch1.pth
 ```
 
 The PACT-CBEA rule module is parameter-free, so it has no trainable checkpoint keys by design.
+The helper now defaults to `opencood/logs/PACT_CBEA_v1/...` local expert
+checkpoints, validates local evidence head keys, avoids silent overwrite unless
+`--force` is passed, and writes a manifest with source paths, file sizes,
+SHA256 hashes, the output checkpoint path, and the current Git commit.
 
 ## Increment Boundary
 
-This first increment includes:
+This v1 Feature Mode increment includes:
 
-- Rule-based evidence routing scaffold.
+- Trainable local evidence heads for m1/m2/m3/m4.
+- PACT-specific Stage1/Stage2 local expert YAML.
+- Rule-based evidence routing with uncertainty and spatial consistency.
 - HEAL-compatible model entry.
 - Local expert checkpoint composition helper.
 - CPU smoke tests.
 
-This first increment does not include:
+This increment does not include:
 
-- Packet mode.
+- Packet-only communication.
 - Federated learning.
 - Full final-inference automation.
-- Stage1/Stage2 rewrites.
+- Centralized Stage3 joint training.
 - Any change to existing HVP_CBEA_v3 training logic.

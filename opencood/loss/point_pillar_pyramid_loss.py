@@ -143,6 +143,27 @@ class PointPillarPyramidLoss(PointPillarDepthLoss):
             'hvp_v3_stage2_descriptor_loss',
             0,
         )
+        pact_cbea_local_evidence_enabled = self.loss_dict.get(
+            'pact_cbea_local_evidence_enabled',
+            False,
+        )
+        pact_cbea_loss = self.loss_dict.get('pact_cbea_loss', 0)
+        pact_cbea_local_evidence_loss = self.loss_dict.get(
+            'pact_cbea_local_evidence_loss',
+            0,
+        )
+        pact_cbea_heatmap_loss = self.loss_dict.get(
+            'pact_cbea_evidence_heatmap_loss',
+            0,
+        )
+        pact_cbea_uncertainty_loss = self.loss_dict.get(
+            'pact_cbea_uncertainty_loss',
+            0,
+        )
+        pact_cbea_descriptor_loss = self.loss_dict.get(
+            'pact_cbea_descriptor_loss',
+            0,
+        )
 
         log_msg = ("[epoch %d][%d/%d]%s || Loss: %.4f || Conf Loss: %.4f"
                    " || Loc Loss: %.4f || Dir Loss: %.4f || IoU Loss: %.4f"
@@ -168,6 +189,19 @@ class PointPillarPyramidLoss(PointPillarDepthLoss):
                     hvp_v3_loss,
                     hvp_v3_stage1_loss,
                 )
+        if pact_cbea_local_evidence_enabled:
+            log_msg += (
+                " || PACT-CBEA Loss: %.3e || Local Evidence Loss: %.3e"
+                " || PACT Evidence Heatmap Loss: %.3e"
+                " || PACT Evidence Unc Loss: %.3e"
+                " || PACT Evidence Desc Loss: %.3e"
+            ) % (
+                pact_cbea_loss,
+                pact_cbea_local_evidence_loss,
+                pact_cbea_heatmap_loss,
+                pact_cbea_uncertainty_loss,
+                pact_cbea_descriptor_loss,
+            )
         print(log_msg)
 
         if not writer is None:
@@ -203,4 +237,19 @@ class PointPillarPyramidLoss(PointPillarDepthLoss):
                     writer.add_scalar('Stage1_hypothesis_loss' + suffix,
                                     hvp_v3_stage1_loss,
                                     epoch*batch_len + batch_id)
+            if pact_cbea_local_evidence_enabled:
+                writer.add_scalar('PACT_CBEA_loss' + suffix, pact_cbea_loss,
+                                epoch*batch_len + batch_id)
+                writer.add_scalar('PACT_CBEA_local_evidence_loss' + suffix,
+                                pact_cbea_local_evidence_loss,
+                                epoch*batch_len + batch_id)
+                writer.add_scalar('PACT_CBEA_evidence_heatmap_loss' + suffix,
+                                pact_cbea_heatmap_loss,
+                                epoch*batch_len + batch_id)
+                writer.add_scalar('PACT_CBEA_evidence_uncertainty_loss' + suffix,
+                                pact_cbea_uncertainty_loss,
+                                epoch*batch_len + batch_id)
+                writer.add_scalar('PACT_CBEA_evidence_descriptor_loss' + suffix,
+                                pact_cbea_descriptor_loss,
+                                epoch*batch_len + batch_id)
 

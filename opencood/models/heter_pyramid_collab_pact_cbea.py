@@ -79,7 +79,11 @@ if "pyquaternion" not in sys.modules:
     sys.modules.setdefault("pyquaternion", pyquaternion_stub)
 
 from opencood.models.heter_pyramid_collab import HeterPyramidCollab
+from opencood.models.sub_modules.pact_cbea_evidence_head import (
+    PACTCBEALocalEvidenceHead,
+)
 from opencood.models.sub_modules.pact_cbea_rule import PACTCBEARule
+from opencood.models.sub_modules.torch_transformation_utils import warp_affine_simple
 from opencood.utils.transformation_utils import normalize_pairwise_tfm
 
 
@@ -100,6 +104,8 @@ class HeterPyramidCollabPactCbea(HeterPyramidCollab):
         )
         if self.pact_cbea_enabled:
             self.pact_cbea_rule = PACTCBEARule(self.pact_cbea_cfg)
+            if self._pact_local_evidence_enabled():
+                self._build_local_evidence_heads(args)
             for param in self.pact_cbea_rule.parameters():
                 param.requires_grad_(False)
             if self.pact_no_joint_training and not self.pact_cbea_trainable:
@@ -160,9 +166,19 @@ class HeterPyramidCollabPactCbea(HeterPyramidCollab):
         if self.compress:
             heter_feature_2d = self.compressor(heter_feature_2d)
 
-        single_feature, occ_outputs = self.pyramid_backbone.forward_single(heter_feature_2d)
+        single_feature, single_occ_outputs = self.pyramid_backbone.forward_single(heter_feature_2d)
         if self.shrink_flag:
             single_feature = self.shrink_conv(single_feature)
+
+        base_fused_feature, occ_outputs = self.pyramid_backbone.forward_collab(
+            heter_feature_2d,
+            record_len,
+            affine_matrix,
+            agent_modality_list,
+            self.cam_crop_info,
+        )
+        if self.shrink_flag:
+            base_fused_feature = self.shrink_conv(base_fused_feature)
 
         if self.supervise_single:
             output_dict.update({
@@ -171,14 +187,47 @@ class HeterPyramidCollabPactCbea(HeterPyramidCollab):
                 "dir_preds_single": self.dir_head(single_feature),
             })
 
-        pact_feature, pact_debug = self.pact_cbea_rule(
-            single_feature,
-            evidence_heatmap=self._lookup_optional_evidence(data_dict, "evidence_heatmap"),
-            evidence_uncertainty=self._lookup_optional_evidence(data_dict, "evidence_uncertainty"),
-            record_len=record_len,
-            pairwise_t_matrix=data_dict.get("pairwise_t_matrix"),
-            modality_names=agent_modality_list,
-        )
+        local_evidence = self._compute_local_evidence(single_feature, agent_modality_list)
+        if local_evidence is None:
+            pact_feature = base_fused_feature
+            pact_debug = {
+                "pact_mode": self.pact_cbea_cfg.get("mode", "trust_calibrated_rule"),
+                "pact_fallbacks": ["missing_local_evidence_heads_base_heal_fallback"],
+                "pact_features_warped_to_ego": False,
+                "pact_evidence_warped_to_ego": False,
+                "pact_used_base_heal_fallback": True,
+                "pact_agent_count": int(single_feature.shape[0]),
+                "pact_trainable": False,
+                "pact_no_joint_training": True,
+            }
+        else:
+            warped_feature = self._warp_to_ego(single_feature, record_len, affine_matrix)
+            warped_logits = self._warp_to_ego(
+                local_evidence["evidence_heatmap_logits"],
+                record_len,
+                affine_matrix,
+            )
+            warped_uncertainty = self._warp_to_ego(
+                local_evidence["evidence_uncertainty"],
+                record_len,
+                affine_matrix,
+            )
+            pact_feature, pact_debug = self.pact_cbea_rule(
+                warped_feature,
+                evidence_heatmap=warped_logits,
+                evidence_uncertainty=warped_uncertainty,
+                record_len=record_len,
+                pairwise_t_matrix=data_dict.get("pairwise_t_matrix"),
+                modality_names=agent_modality_list,
+            )
+            pact_debug.update({
+                "pact_features_warped_to_ego": True,
+                "pact_evidence_warped_to_ego": True,
+                "pact_uncertainty_warped_to_ego": True,
+                "pact_used_base_heal_fallback": False,
+                "pact_evidence_heatmap_logits": warped_logits,
+                "pact_evidence_uncertainty": warped_uncertainty,
+            })
         pact_debug.update({
             "pact_cbea_enabled": True,
             "pact_trainable": bool(self.pact_cbea_trainable),
@@ -186,6 +235,7 @@ class HeterPyramidCollabPactCbea(HeterPyramidCollab):
             "pact_use_stage3_joint_training": bool(self.pact_use_stage3_joint_training),
             "heal_compatible": bool(self.pact_cbea_cfg.get("heal_compatible", True)),
             "plug_and_play": bool(self.pact_cbea_cfg.get("plug_and_play", True)),
+            "pact_local_evidence_enabled": bool(self._pact_local_evidence_enabled()),
         })
 
         cls_preds = self.cls_head(pact_feature)
@@ -196,10 +246,67 @@ class HeterPyramidCollabPactCbea(HeterPyramidCollab):
             'cls_preds': cls_preds,
             'reg_preds': reg_preds,
             'dir_preds': dir_preds,
-            'occ_single_list': occ_outputs,
-            'pact_cbea': pact_debug,
+                'occ_single_list': occ_outputs,
+                'pact_cbea': pact_debug,
         })
         return output_dict
+
+    def _build_local_evidence_heads(self, args):
+        head_cfg = self.pact_cbea_cfg["evidence_head"]
+        for modality_name in self.modality_name_list:
+            setattr(
+                self,
+                f"pact_cbea_evidence_head_{modality_name}",
+                PACTCBEALocalEvidenceHead(
+                    in_channels=int(head_cfg.get("in_channels", args.get("in_head", 256))),
+                    hidden_dim=int(head_cfg.get("hidden_dim", 64)),
+                    descriptor_dim=int(head_cfg.get("descriptor_dim", 16)),
+                    use_sigmoid=bool(head_cfg.get("use_sigmoid", True)),
+                    normalize_descriptor=bool(head_cfg.get("normalize_descriptor", True)),
+                    return_feature=bool(head_cfg.get("return_feature", False)),
+                ),
+            )
+
+    def _compute_local_evidence(self, feature, agent_modality_list):
+        if not self._pact_local_evidence_enabled():
+            return None
+        logits = []
+        heatmaps = []
+        uncertainties = []
+        for idx, modality_name in enumerate(agent_modality_list):
+            head_name = f"pact_cbea_evidence_head_{modality_name}"
+            if not hasattr(self, head_name):
+                return None
+            head_output = getattr(self, head_name)(feature[idx:idx + 1])
+            logits.append(head_output["evidence_heatmap_logits"])
+            heatmaps.append(head_output["evidence_heatmap"])
+            uncertainties.append(head_output["evidence_uncertainty"])
+        return {
+            "evidence_heatmap_logits": torch.cat(logits, dim=0),
+            "evidence_heatmap": torch.cat(heatmaps, dim=0),
+            "evidence_uncertainty": torch.cat(uncertainties, dim=0),
+        }
+
+    def _warp_to_ego(self, tensor, record_len, affine_matrix):
+        _, _, height, width = tensor.shape
+        split_tensor = torch.tensor_split(
+            tensor,
+            torch.cumsum(record_len, dim=0)[:-1].cpu(),
+        )
+        warped = []
+        align_corners = bool(getattr(self.pyramid_backbone, "align_corners", False))
+        for batch_idx, group_tensor in enumerate(split_tensor):
+            cav_num = int(record_len[batch_idx])
+            ego_to_agent = affine_matrix[batch_idx, 0, :cav_num, :, :]
+            warped.append(
+                warp_affine_simple(
+                    group_tensor,
+                    ego_to_agent,
+                    (height, width),
+                    align_corners=align_corners,
+                )
+            )
+        return torch.cat(warped, dim=0)
 
     @staticmethod
     def _lookup_optional_evidence(data_dict, key):
@@ -210,6 +317,12 @@ class HeterPyramidCollabPactCbea(HeterPyramidCollab):
             return pact_payload[key]
         return None
 
+    def _pact_local_evidence_enabled(self):
+        return (
+            bool(self.pact_cbea_cfg.get("local_evidence", {}).get("enabled", False))
+            and bool(self.pact_cbea_cfg.get("evidence_head", {}).get("enabled", False))
+        )
+
     def _freeze_all_model_parameters(self):
         for param in self.parameters():
             param.requires_grad_(False)
@@ -218,11 +331,37 @@ class HeterPyramidCollabPactCbea(HeterPyramidCollab):
     @classmethod
     def _normalize_pact_cfg(cls, cfg):
         normalized = PACTCBEARule._default_cfg()
+        normalized.update({
+            "local_evidence": {
+                "enabled": False,
+            },
+            "evidence_head": {
+                "enabled": False,
+                "in_channels": 256,
+                "hidden_dim": 64,
+                "descriptor_dim": 16,
+                "use_sigmoid": True,
+                "normalize_descriptor": True,
+                "return_feature": False,
+            },
+        })
         if isinstance(cfg, bool):
             normalized["enabled"] = bool(cfg)
         elif isinstance(cfg, dict):
             _deep_update(normalized, cfg)
         normalized = PACTCBEARule._normalize_cfg(normalized)
+        normalized["local_evidence"]["enabled"] = bool(
+            normalized["local_evidence"].get("enabled", False)
+            or normalized["local_evidence"].get("enable", False)
+        )
+        head = normalized["evidence_head"]
+        head["enabled"] = bool(head.get("enabled", False) or head.get("enable", False))
+        head["in_channels"] = int(head.get("in_channels", 256))
+        head["hidden_dim"] = int(head.get("hidden_dim", 64))
+        head["descriptor_dim"] = int(head.get("descriptor_dim", 16))
+        head["use_sigmoid"] = bool(head.get("use_sigmoid", True))
+        head["normalize_descriptor"] = bool(head.get("normalize_descriptor", True))
+        head["return_feature"] = bool(head.get("return_feature", False))
         if normalized["trainable"]:
             raise ValueError("PACT-CBEA v1 is parameter-free; pact_cbea.trainable must be false")
         if not normalized["no_joint_training"]:

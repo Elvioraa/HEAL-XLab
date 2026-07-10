@@ -420,6 +420,88 @@ def compute_hvp_v3_loss(hvp_v3_dict, target_dict=None, fallback_on_error=True):
     )
 
 
+def compute_pact_cbea_local_evidence_loss(pact_dict, target_dict=None,
+                                          fallback_on_error=True):
+    cfg = normalize_hvp_v3_stage2_evidence_loss_cfg(
+        (pact_dict or {}).get("evidence_loss_cfg")
+    )
+    ref_tensor = None
+    if isinstance(pact_dict, dict):
+        ref_tensor = pact_dict.get("evidence_heatmap_logits")
+        if not torch.is_tensor(ref_tensor):
+            ref_tensor = pact_dict.get("evidence_heatmap")
+    zero = _zero_like(ref_tensor)
+    stats = _zero_pact_local_evidence_stats()
+    stats["pact_cbea_local_evidence_enabled"] = bool(
+        isinstance(pact_dict, dict)
+        and pact_dict.get("enabled", False)
+        and pact_dict.get("stage", "") == "local_evidence"
+    )
+    stats["pact_cbea_stage"] = (pact_dict or {}).get("stage", "")
+    if not stats["pact_cbea_local_evidence_enabled"] or not cfg["enabled"]:
+        return zero, stats
+    if cfg["mode"] not in ("pact_local_evidence", "local_evidence", "stage2_evidence"):
+        stats["pact_cbea_fallback_reason"] = "unsupported_mode:%s" % cfg["mode"]
+        return zero, stats
+
+    try:
+        if not isinstance(pact_dict, dict):
+            raise ValueError("pact_cbea output is missing")
+        logits = pact_dict.get("evidence_heatmap_logits")
+        if not torch.is_tensor(logits):
+            raise ValueError("PACT-CBEA evidence_heatmap_logits is missing")
+        pos_map, source = _extract_anchor_positive_map(target_dict, logits)
+        target = _resize_positive_map(pos_map, logits)
+        losses = []
+
+        heatmap_cfg = cfg["evidence_heatmap"]
+        if heatmap_cfg.get("enabled", False):
+            pos_weight = logits.new_tensor(heatmap_cfg.get("pos_weight", 1.0))
+            heatmap_loss = F.binary_cross_entropy_with_logits(
+                logits.float(),
+                target.float(),
+                pos_weight=pos_weight,
+            )
+            weighted = heatmap_loss * heatmap_cfg["weight"]
+            losses.append(weighted)
+            stats["pact_cbea_evidence_heatmap_loss"] = _item(weighted)
+
+        uncertainty_cfg = cfg["uncertainty"]
+        if uncertainty_cfg.get("enabled", False):
+            uncertainty = _require_tensor(pact_dict, "evidence_uncertainty")
+            fg_mask = _resize_positive_map(target, uncertainty)
+            denom = torch.clamp(fg_mask.sum(), min=1.0)
+            uncertainty_loss = (uncertainty.float() * fg_mask.float()).sum() / denom
+            weighted = uncertainty_loss * uncertainty_cfg["weight"]
+            losses.append(weighted)
+            stats["pact_cbea_uncertainty_loss"] = _item(weighted)
+
+        descriptor_cfg = cfg["descriptor"]
+        if descriptor_cfg.get("enabled", False):
+            descriptor = _require_tensor(pact_dict, "evidence_descriptor")
+            descriptor_loss = _descriptor_smoothness_loss(descriptor)
+            weighted = descriptor_loss * descriptor_cfg["weight"]
+            losses.append(weighted)
+            stats["pact_cbea_descriptor_loss"] = _item(weighted)
+
+        total = sum(losses, zero)
+        if not torch.isfinite(total):
+            raise ValueError("PACT-CBEA local evidence loss is not finite")
+        stats.update({
+            "pact_cbea_loss": _item(total),
+            "pact_cbea_local_evidence_loss": _item(total),
+            "pact_cbea_target_source": source,
+            "pact_cbea_fg_ratio": _item(target.float().mean()),
+            "pact_cbea_fallback_reason": "",
+        })
+        return total, stats
+    except Exception as exc:
+        if not fallback_on_error:
+            raise ValueError("PACT-CBEA local evidence loss failed: %s" % exc) from exc
+        stats["pact_cbea_fallback_reason"] = "%s:%s" % (type(exc).__name__, str(exc))
+        return zero, stats
+
+
 def _compute_gt_guided_loss(aux_dict, target_dict, gt_cfg, fallback_on_error=True):
     zero = _zero_like(_find_ref_tensor(aux_dict))
     stats = _zero_gt_stats()
@@ -683,6 +765,21 @@ def _zero_hvp_v3_stats():
         "hvp_v3_fg_ratio": 0.0,
         "hvp_v3_target_source": "",
         "hvp_v3_fallback_reason": "",
+    }
+
+
+def _zero_pact_local_evidence_stats():
+    return {
+        "pact_cbea_local_evidence_enabled": False,
+        "pact_cbea_stage": "",
+        "pact_cbea_loss": 0.0,
+        "pact_cbea_local_evidence_loss": 0.0,
+        "pact_cbea_evidence_heatmap_loss": 0.0,
+        "pact_cbea_uncertainty_loss": 0.0,
+        "pact_cbea_descriptor_loss": 0.0,
+        "pact_cbea_fg_ratio": 0.0,
+        "pact_cbea_target_source": "",
+        "pact_cbea_fallback_reason": "",
     }
 
 

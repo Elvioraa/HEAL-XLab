@@ -143,6 +143,15 @@ model:
       use_stage3_joint_training: false
       heal_compatible: true
       plug_and_play: true
+      local_evidence:
+        enabled: true
+      evidence_head:
+        enabled: true
+        in_channels: 256
+        hidden_dim: 64
+        descriptor_dim: 16
+        use_sigmoid: true
+        normalize_descriptor: true
       aggregation:
         evidence_confidence: true
         uncertainty_weight: true
