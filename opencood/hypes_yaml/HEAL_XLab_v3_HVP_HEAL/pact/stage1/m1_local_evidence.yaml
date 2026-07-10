@@ -81,6 +81,7 @@ model:
   core_method: heter_pyramid_collab_pact_cbea_stage1
   args:
     lidar_range: *cav_lidar
+    supervise_single: true
     pact_cbea:
       enabled: true
       stage: stage1_local_evidence

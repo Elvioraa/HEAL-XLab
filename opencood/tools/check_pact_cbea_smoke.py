@@ -167,6 +167,7 @@ def main():
     _check_stage1_trainability_and_backward(stage1_model, stage1_output)
     local_param_count = _local_head_param_count(stage1_model, "m1")
     print("PACT-CBEA Stage1 collab forward/loss/backward OK")
+    print("PACT-CBEA Stage1 single supervision loss/backward OK")
     _check_real_stage1_batch(STAGE1_YAML, options.require_real_stage1)
 
     for modality_name, yaml_path in STAGE2_LOCAL_YAMLS.items():
@@ -243,6 +244,7 @@ def _assert_stage1_yaml(hypes):
     assert cfg["trainable"] is True
     assert cfg["no_joint_training"] is True
     assert cfg["use_stage3_joint_training"] is False
+    assert hypes["model"]["args"]["supervise_single"] is True
     assert cfg["local_evidence"]["train_mode"] == "stage1_base_train"
     assert cfg["local_evidence"]["enabled"] is True
     assert cfg["evidence_head"]["enabled"] is True
@@ -276,6 +278,7 @@ def _build_dummy_stage1_model(pact_cfg):
     model.fake_voxel_size = 1
     model.compress = False
     model.shrink_flag = True
+    model.supervise_single = True
     setattr(model, "encoder_m1", _DummyEncoder())
     setattr(model, "backbone_m1", _DummyBackbone())
     setattr(model, "aligner_m1", _DummyAligner())
@@ -313,6 +316,9 @@ def _assert_stage1_output(output_dict):
     assert output_dict["cls_preds"].shape == (1, 2, 16, 16)
     assert output_dict["reg_preds"].shape == (1, 14, 16, 16)
     assert output_dict["dir_preds"].shape == (1, 4, 16, 16)
+    assert output_dict["cls_preds_single"].shape == (1, 2, 16, 16)
+    assert output_dict["reg_preds_single"].shape == (1, 14, 16, 16)
+    assert output_dict["dir_preds_single"].shape == (1, 4, 16, 16)
     pact = output_dict["pact_cbea"]
     assert pact["stage"] == "local_evidence"
     assert pact["train_mode"] == "stage1_base_train"
@@ -338,11 +344,14 @@ def _check_stage1_trainability_and_backward(model, output_dict):
     assert _trainable_count(model.pact_cbea_rule) == 0
 
     criterion = PointPillarPyramidLoss(_loss_args())
-    total_loss = criterion(output_dict, _dummy_target())
-    assert torch.isfinite(total_loss)
+    detection_loss = criterion(output_dict, _dummy_target())
+    assert torch.isfinite(detection_loss)
     assert criterion.loss_dict["pact_cbea_local_evidence_enabled"] is True
     assert criterion.loss_dict["pact_cbea_local_evidence_loss"] > 0.0
-    total_loss.backward()
+    single_loss = criterion(output_dict, _dummy_target(), suffix="_single")
+    assert torch.isfinite(single_loss)
+    assert single_loss.detach().item() > 0.0
+    (detection_loss + single_loss).backward()
     for module_name in expected_modules:
         module = getattr(model, module_name)
         assert any(
@@ -394,9 +403,17 @@ def _check_real_stage1_batch(yaml_path, required):
     model.model_train_init()
     batch_data = train_utils.to_device(batch_data, device)
     output_dict = model(batch_data["ego"])
-    total_loss = criterion(output_dict, batch_data["ego"]["label_dict"])
-    assert torch.isfinite(total_loss)
-    total_loss.backward()
+    detection_loss = criterion(output_dict, batch_data["ego"]["label_dict"])
+    assert torch.isfinite(detection_loss)
+    assert "label_dict_single" in batch_data["ego"]
+    single_loss = criterion(
+        output_dict,
+        batch_data["ego"]["label_dict_single"],
+        suffix="_single",
+    )
+    assert torch.isfinite(single_loss)
+    assert single_loss.detach().item() > 0.0
+    (detection_loss + single_loss).backward()
     head = model.pact_cbea_evidence_head_m1
     assert any(
         param.grad is not None
@@ -405,7 +422,7 @@ def _check_real_stage1_batch(yaml_path, required):
         for param in head.parameters()
     )
     print(
-        "PACT-CBEA Stage1 real DataLoader batch forward/loss/backward OK "
+        "PACT-CBEA Stage1 real DataLoader batch forward/loss/single-backward OK "
         "(train=%d validate=%d)" % (len(train_dataset), len(validate_dataset))
     )
     return True

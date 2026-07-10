@@ -96,6 +96,7 @@ class HeterPyramidCollabPactCbeaStage1(HeterPyramidCollab):
 
     def __init__(self, args):
         super().__init__(args)
+        self.supervise_single = bool(args.get("supervise_single", False))
         self.pact_cbea_cfg = self._normalize_pact_stage1_cfg(args.get("pact_cbea"))
         self.pact_cbea_enabled = bool(self.pact_cbea_cfg["enabled"])
         self.pact_cbea_rule = PACTCBEARule(self.pact_cbea_cfg)
@@ -178,6 +179,16 @@ class HeterPyramidCollabPactCbeaStage1(HeterPyramidCollab):
         heter_feature_2d = torch.stack(heter_feature_2d_list)
         if self.compress:
             heter_feature_2d = self.compressor(heter_feature_2d)
+
+        if self.supervise_single:
+            single_feature, _ = self.pyramid_backbone.forward_single(heter_feature_2d)
+            if self.shrink_flag:
+                single_feature = self.shrink_conv(single_feature)
+            output_dict.update({
+                "cls_preds_single": self.cls_head(single_feature),
+                "reg_preds_single": self.reg_head(single_feature),
+                "dir_preds_single": self.dir_head(single_feature),
+            })
 
         fused_feature, occ_outputs = self.pyramid_backbone.forward_collab(
             heter_feature_2d,
