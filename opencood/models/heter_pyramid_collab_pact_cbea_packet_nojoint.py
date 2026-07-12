@@ -132,15 +132,24 @@ class HeterPyramidCollabPactCbeaPacketNojoint(HeterPyramidCollab):
             affine_matrix = normalize_pairwise_tfm(
                 data_dict["pairwise_t_matrix"], self.H, self.W, self.fake_voxel_size
             )
-            heter_feature_2d = self._encode_agent_features(data_dict, output_dict)
             try:
-                ego_feature, occ_outputs, scene_packets = self._run_local_experts(
+                heter_feature_2d = self._encode_agent_features(data_dict, output_dict)
+                ego_feature, occ_outputs = self._extract_ego_local_features(
+                    heter_feature_2d, record_len
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    "PACT no-joint ego feature generation failed; packet fallback is unavailable: %s" % exc
+                ) from exc
+
+            try:
+                scene_packets = self._build_scene_packets(
                     heter_feature_2d,
                     record_len,
                     agent_modality_list,
                     affine_matrix,
+                    ego_feature,
                 )
-                del heter_feature_2d
                 enhanced_feature, packet_map, aggregation_debug = self.pact_packet_nojoint_aggregator(
                     ego_feature, scene_packets
                 )
@@ -154,6 +163,9 @@ class HeterPyramidCollabPactCbeaPacketNojoint(HeterPyramidCollab):
                 aggregation_debug = {"empty_packet": True, "valid_packet_count": 0}
                 comm_stats = self.pact_packet_nojoint_comm_meter([])
                 fallback_reason = "%s: %s" % (type(exc).__name__, exc)
+            finally:
+                # Packet aggregation never receives this multi-agent tensor.
+                del heter_feature_2d
 
             debug = {
                 "packet_only_verified": True,
@@ -215,19 +227,15 @@ class HeterPyramidCollabPactCbeaPacketNojoint(HeterPyramidCollab):
             offsets[modality_name] += 1
         return torch.stack(assembled)
 
-    def _run_local_experts(self, agent_features, record_len, modality_names, affine_matrix):
-        """Run each local expert independently and retain only ego dense state."""
-        scene_packets = []
+    def _extract_ego_local_features(self, agent_features, record_len):
+        """Build the sole dense ego detection context before packet handling."""
         ego_features = []
         ego_occ_outputs = []
         start = 0
-        for batch_index, length in enumerate(record_len.detach().cpu().tolist()):
+        for length in record_len.detach().cpu().tolist():
             length = int(length)
             if length < 1:
                 raise ValueError("record_len entries must be positive")
-
-            # The first CAV is the ego context and is the only dense feature
-            # retained for detection. Every collaborator is packetized below.
             ego_feature, ego_occ = self.pyramid_backbone.forward_single(
                 agent_features[start:start + 1]
             )
@@ -235,6 +243,17 @@ class HeterPyramidCollabPactCbeaPacketNojoint(HeterPyramidCollab):
                 ego_feature = self.shrink_conv(ego_feature)
             ego_features.append(ego_feature)
             ego_occ_outputs.append(ego_occ)
+            start += length
+
+        return torch.cat(ego_features, dim=0), self._merge_ego_occ_outputs(ego_occ_outputs)
+
+    def _build_scene_packets(self, agent_features, record_len, modality_names, affine_matrix,
+                             ego_feature):
+        """Packetize collaborators after all ego features have been retained."""
+        scene_packets = []
+        start = 0
+        for batch_index, length in enumerate(record_len.detach().cpu().tolist()):
+            length = int(length)
 
             packet_parts = []
             for local_index in range(1, length):
@@ -257,13 +276,11 @@ class HeterPyramidCollabPactCbeaPacketNojoint(HeterPyramidCollab):
                 ))
                 del collaborator_feature
                 del head_output
-            scene_packets.append(self._merge_packets(packet_parts, ego_feature))
+            scene_packets.append(self._merge_packets(
+                packet_parts, ego_feature[batch_index:batch_index + 1]
+            ))
             start += length
-        return (
-            torch.cat(ego_features, dim=0),
-            self._merge_ego_occ_outputs(ego_occ_outputs),
-            scene_packets,
-        )
+        return scene_packets
 
     @staticmethod
     def _merge_ego_occ_outputs(ego_occ_outputs):
@@ -287,10 +304,12 @@ class HeterPyramidCollabPactCbeaPacketNojoint(HeterPyramidCollab):
                 "valid_mask": torch.empty((0,), device=device, dtype=torch.bool),
                 "packet_source": PACKET_SOURCE,
             }
-        return {
+        merged = {
             key: torch.cat([packet[key] for packet in packet_parts], dim=0)
             for key in ("coordinates", "confidence", "uncertainty", "modality_id", "agent_id", "valid_mask")
-        } | {"packet_source": PACKET_SOURCE}
+        }
+        merged["packet_source"] = PACKET_SOURCE
+        return merged
 
     def _freeze_all_parameters_and_eval(self):
         # Call nn.Module directly so this wrapper's train override cannot

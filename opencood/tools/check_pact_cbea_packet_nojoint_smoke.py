@@ -85,6 +85,8 @@ def main():
     _check_frozen_model(model)
     output = model(_dummy_data())
     _assert_forward(output)
+    _check_python38_packet_merge(model)
+    _check_packet_failure_fallback(model)
     _check_empty_packet(model)
     _check_failure_policy()
     _check_checkpoint_loading(hypes)
@@ -94,10 +96,12 @@ def main():
     print("PACT no-joint aggregator parameter-free OK")
     print("PACT no-joint top-K packet OK")
     print("PACT no-joint confidence uncertainty sampling OK")
+    print("PACT no-joint Python 3.8 packet merge OK")
     print("PACT no-joint coordinate mapping OK")
     print("PACT no-joint multi-scene record_len OK")
     print("PACT no-joint ego-first selection OK")
     print("PACT no-joint empty packet ego-only OK")
+    print("PACT no-joint packet failure ego-only fallback OK")
     print("PACT no-joint frozen BN eval OK")
     print("PACT no-joint checkpoint load OK")
     print("PACT no-joint communication boundary OK")
@@ -227,6 +231,50 @@ def _check_empty_packet(model):
     debug = output["pact_packet_nojoint_debug"]
     assert debug["packet_count"] == 0
     assert debug["packet_aggregation"]["empty_packet"] is True
+
+
+def _check_python38_packet_merge(model):
+    reference = torch.zeros(1, 64, 8, 8)
+    packet = model.pact_packet_nojoint_packetizer(
+        torch.ones(1, 1, 8, 8),
+        torch.zeros(1, 1, 8, 8),
+        "m2",
+        1,
+        torch.eye(2, 3),
+    )
+    merged = model._merge_packets([packet, packet], reference)
+    assert merged["packet_source"] == PACKET_SOURCE
+    assert merged["coordinates"].shape[0] == 2 * packet["coordinates"].shape[0]
+
+
+def _check_packet_failure_fallback(model):
+    data = _dummy_data()
+    with torch.no_grad():
+        raw_features = model._encode_agent_features(data, {})
+        ego_feature, _ = model._extract_ego_local_features(
+            raw_features, data["record_len"]
+        )
+        expected_cls = model.cls_head(ego_feature)
+
+    original_merge = model._merge_packets
+
+    def _raise_forced_merge_error(*unused_args):
+        raise RuntimeError("forced packet merge failure")
+
+    model._merge_packets = _raise_forced_merge_error
+    try:
+        output = model(data)
+    finally:
+        model._merge_packets = original_merge
+
+    debug = output["pact_packet_nojoint_debug"]
+    assert torch.allclose(output["cls_preds"], expected_cls)
+    assert debug["fallback_reason"]
+    assert "forced packet merge failure" in debug["fallback_reason"]
+    assert "UnboundLocalError" not in debug["fallback_reason"]
+    assert debug["packet_only_verified"] is True
+    assert debug["dense_collab_fusion_used"] is False
+    assert debug["collaborator_dense_after_packet_used"] is False
 
 
 def _check_failure_policy():
