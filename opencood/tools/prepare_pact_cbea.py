@@ -128,12 +128,17 @@ def _validate_checkpoint(modality, path):
     prefix = "pact_cbea_evidence_head_%s" % modality
     if not any(key.startswith(prefix) for key in state_dict.keys()):
         raise KeyError("%s does not contain local evidence head prefix %s" % (path, prefix))
-    expected_model_prefixes = (
+    # m1 uses a parameter-free Identity aligner, so its checkpoint
+    # legitimately contains no aligner_m1.* keys. Other modalities keep
+    # strict aligner validation because their aligners are trainable.
+    expected_model_prefixes = [
         "encoder_%s" % modality,
         "backbone_%s" % modality,
-        "aligner_%s" % modality,
         prefix,
-    )
+    ]
+    if modality != "m1":
+        expected_model_prefixes.append("aligner_%s" % modality)
+
     missing = [
         prefix_name
         for prefix_name in expected_model_prefixes
