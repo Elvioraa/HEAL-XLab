@@ -963,3 +963,72 @@ Base hash: `972582f`
 - Official HEAL `heter_pyramid_collab.py` is not modified.
 - Stage1 and Stage2 smoke paths remain unchanged.
 - Packet mode remains disabled in the Stage3 yaml.
+
+## HEAL-XLab-v4 BGER box-guided evidence reactivation
+
+Base hash: `1334db0`
+
+### Motivation
+
+- Explore an asymmetric weak-communication collaboration paradigm:
+  collaborators transmit only detection boxes (decision-level, ~KB), the
+  ego projects them into its BEV frame and re-examines its own features
+  through a small trainable module (feature-level fusion) before the
+  shared HEAL heads.
+- Compared with PACT-CBEA feature transmission, BGER targets the
+  accuracy-bandwidth pareto frontier; heterogeneity is handled at the box
+  level, so a new vendor only needs a standard detector output.
+
+### Implementation
+
+- `opencood/models/sub_modules/bger_box_prior.py`
+  - Parameter-free rasterizer from ego-frame boxes to BEV prior maps
+    (confidence-weighted gaussian bump, rotated box mask, optional yaw
+    channels).
+- `opencood/models/sub_modules/bger_refine.py`
+  - Prior-conditioned residual refinement; zero-init output conv makes the
+    module an exact identity at initialization.
+- `opencood/models/heter_pyramid_collab_bger.py`
+  - `HeterPyramidCollabBger(HeterPyramidCollab)` gated by
+    `model.args.bger.enabled`; disabled or absent falls through to the
+    official forward unchanged.
+  - `box_source: oracle` uses per-agent single-view GT already collated by
+    the intermediateheter dataset; `box_source: single_decode` decodes
+    detached boxes from each collaborator's single branch via the shared
+    heads and `delta_to_boxes3d` + rotated NMS.
+  - Boxes are projected collaborator->ego with
+    `pairwise_t_matrix[b, j, 0]` and corner-based `project_box3d`.
+  - `freeze_base: true` freezes everything except `bger_refine`; a
+    `train()` override keeps frozen BN buffers in eval mode.
+  - `output_dict['bger']` reports collaborator boxes and communication
+    accounting (`comm_bytes_boxes` vs `comm_bytes_feature_equiv`).
+- `opencood/hypes_yaml/HEAL_XLab_v4_BGER/stage_a/m1_bger_oracle.yaml`
+- `opencood/hypes_yaml/HEAL_XLab_v4_BGER/stage_b/m1_ego_heter_bger_single.yaml`
+- `opencood/hypes_yaml/HEAL_XLab_v4_BGER/final_infer/m1_ego_m2m3m4_bger.yaml`
+- `opencood/hypes_yaml/HEAL_XLab_v4_BGER/final_infer/m1_ego_m2m3m4_boxmerge.yaml`
+  - Oracle upper-bound training, heterogeneous single_decode finetuning,
+    and evaluation configs including the late-fusion control group.
+- `opencood/tools/prepare_bger.py`
+  - Composes stage_a/stage_b init checkpoints from official HEAL Stage1 m1
+    and Stage2 m2/m3/m4 checkpoints (+ stage_a bger_refine weights), with
+    manifest, SHA256, and overwrite protection.
+- `opencood/tools/inference_bger.py`
+  - Standalone inference entry with `--box_merge` late-fusion baseline and
+    test-set-averaged communication accounting.
+- `opencood/tools/check_bger_smoke.py`
+  - CPU smoke: yaml sanity, disabled == official bit-exact equivalence,
+    oracle / single_decode forwards, refine zero-init identity, prior
+    rendering and box projection geometry, gradient isolation.
+- `docs/BGER_PLAN.md`
+  - Method positioning, training/evaluation protocol, increment boundary.
+
+### Safety
+
+- All BGER files are new; no official model, dataset, loss, train.py,
+  inference.py, or official yaml is modified.
+- `model.args.bger` absent or `enabled: false` reproduces the official
+  `heter_pyramid_collab` outputs bit-exactly (asserted in the smoke test).
+- Collaborator boxes are always detached; no gradient crosses the
+  communication boundary, and no GT is used for fusion in
+  `single_decode` mode (oracle mode is explicitly an upper-bound
+  experiment).
