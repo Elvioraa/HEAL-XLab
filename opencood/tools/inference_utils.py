@@ -144,6 +144,23 @@ def inference_early_fusion(batch_data, model, dataset):
     pred_box_tensor, pred_score, gt_box_tensor = \
         dataset.post_process(batch_data,
                              output_dict)
+
+    ego_output = output_dict['ego']
+    if ego_output.get('box_packet_nojoint_enabled', False):
+        required_keys = (
+            'box_packet_pred_box_tensor',
+            'box_packet_pred_score',
+        )
+        missing_keys = [
+            key for key in required_keys if key not in ego_output
+        ]
+        if missing_keys:
+            raise RuntimeError(
+                'box-packet no-joint output is missing required fields: %s'
+                % ', '.join(missing_keys)
+            )
+        pred_box_tensor = ego_output['box_packet_pred_box_tensor']
+        pred_score = ego_output['box_packet_pred_score']
     
     return_dict = {"pred_box_tensor" : pred_box_tensor, \
                     "pred_score" : pred_score, \
