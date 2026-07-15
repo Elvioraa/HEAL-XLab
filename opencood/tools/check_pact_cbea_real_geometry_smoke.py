@@ -49,6 +49,7 @@ from opencood.tools.audit_pact_cbea_real_geometry import (
     synthetic_agent_order_check,
     warp_feature_and_validity,
 )
+import opencood.tools.audit_pact_cbea_real_geometry as geometry_audit
 from opencood.models.sub_modules.pact_cbea_evidence_routed import (
     PACTCBEAEvidenceGeometryAligner,
 )
@@ -203,6 +204,63 @@ def _assert_checkpoint_resolution():
             raise AssertionError("absolute checkpoint path changed")
 
 
+def _assert_warp_dtype_device_contract():
+    feature32 = torch.arange(64, dtype=torch.float32).view(1, 1, 8, 8)
+    affine64 = torch.tensor(
+        [[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]], dtype=torch.float64
+    )
+    warped32, validity32, grid32 = warp_feature_and_validity(feature32, affine64)
+    for value in (warped32, validity32, grid32):
+        if value.dtype != feature32.dtype or value.device != feature32.device:
+            raise AssertionError("float32 feature warp did not preserve dtype/device")
+    _assert_close(warped32, feature32, "float64 identity affine changed float32 feature")
+    _assert_close(validity32, torch.ones_like(validity32), "float32 identity validity changed")
+
+    feature64 = feature32.double()
+    affine32 = affine64.float()
+    # This local CPU Torch build terminates during a real float64 grid_sample
+    # call. Keep the production function unchanged and assert the double
+    # dtype/device contract at its grid_sample boundary with a process-local
+    # replacement. float32 coverage above still uses the real kernel.
+    original_grid_sample = geometry_audit.F.grid_sample
+    observed = []
+
+    def checked_double_grid_sample(packed, grid, **kwargs):
+        if packed.dtype != feature64.dtype or grid.dtype != feature64.dtype:
+            raise AssertionError("float64 packed/grid dtype mismatch at grid_sample boundary")
+        if packed.device != feature64.device or grid.device != feature64.device:
+            raise AssertionError("float64 packed/grid device mismatch at grid_sample boundary")
+        observed.append(kwargs)
+        return packed.clone()
+
+    geometry_audit.F.grid_sample = checked_double_grid_sample
+    try:
+        warped64, validity64, grid64 = warp_feature_and_validity(feature64, affine32)
+    finally:
+        geometry_audit.F.grid_sample = original_grid_sample
+    if len(observed) != 1 or observed[0].get("mode") != "bilinear" or \
+            observed[0].get("padding_mode") != "zeros":
+        raise AssertionError("float64 grid_sample settings changed")
+    for value in (warped64, validity64, grid64):
+        if value.dtype != feature64.dtype or value.device != feature64.device:
+            raise AssertionError("float64 feature warp did not preserve dtype/device")
+    _assert_close(warped64, feature64, "float32 identity affine changed float64 feature", atol=1e-10)
+    _assert_close(validity64, torch.ones_like(validity64), "float64 identity validity changed", atol=1e-10)
+
+    pairwise64 = torch.eye(4, dtype=torch.float64).view(1, 1, 4, 4)
+    candidate_identity = build_candidate_affine(
+        pairwise64, "D_identity", 8, 8, 1.0
+    )
+    candidate_warped, candidate_validity, candidate_grid = warp_feature_and_validity(
+        feature32, candidate_identity
+    )
+    for value in (candidate_warped, candidate_validity, candidate_grid):
+        if value.dtype != feature32.dtype or value.device != feature32.device:
+            raise AssertionError("candidate identity dtype/device contract failed")
+    _assert_close(candidate_warped, feature32,
+                  "float64 candidate identity changed float32 feature")
+
+
 def main():
     torch.manual_seed(7)
     feature = torch.zeros((1, 1, 8, 8))
@@ -273,6 +331,7 @@ def main():
 
     _assert_aligner_wrapper_contract()
     _assert_checkpoint_resolution()
+    _assert_warp_dtype_device_contract()
     _assert_python38(AUDIT_PATH)
     _assert_python38(os.path.abspath(__file__))
     _assert_only_new_files_changed()
@@ -281,6 +340,7 @@ def main():
     print("validity grid, record_len isolation, and agent order: OK")
     print("JSON/CSV fields and Python 3.8 AST: OK")
     print("real aligner wrapper contract and checkpoint resolution: OK")
+    print("float32/float64 affine dtype-device contract: OK")
     print("PACT_CBEA_REAL_GEOMETRY_AUDIT_SMOKE_PASS")
 
 

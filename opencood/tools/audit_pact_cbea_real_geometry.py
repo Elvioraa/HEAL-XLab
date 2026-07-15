@@ -80,14 +80,33 @@ def _inverse_affine(affine):
     return torch.linalg.inv(_to_homogeneous(affine))[:, :2, :]
 
 
+def _prepare_warp_affine(feature, affine):
+    """Use the captured feature as the dtype/device authority for sampling."""
+    if not torch.is_tensor(feature) or feature.ndim != 4:
+        raise ValueError("feature must be a 4D Tensor")
+    if not feature.is_floating_point():
+        raise ValueError("feature must use a floating point dtype")
+    if not torch.is_tensor(affine) or affine.shape != (feature.shape[0], 2, 3):
+        raise ValueError("affine must have shape [N,2,3] matching feature")
+    if not affine.is_floating_point():
+        raise ValueError("affine must use a floating point dtype")
+    # Pairwise matrices originate as NumPy float64. Convert only the sampling
+    # affine at this boundary; never promote the captured model feature.
+    affine = affine.to(device=feature.device, dtype=feature.dtype)
+    if affine.device != feature.device or affine.dtype != feature.dtype:
+        raise RuntimeError("warp affine dtype/device does not match feature")
+    return affine
+
+
 def warp_feature_and_validity(feature, affine, align_corners=False):
     """Exactly mirror v2's affine_grid/grid_sample settings for diagnostics."""
-    if feature.ndim != 4 or affine.shape != (feature.shape[0], 2, 3):
-        raise ValueError("feature [N,C,H,W] and affine [N,2,3] are required")
+    affine = _prepare_warp_affine(feature, affine)
     validity = torch.ones((feature.shape[0], 1, feature.shape[2], feature.shape[3]),
                           device=feature.device, dtype=feature.dtype)
     packed = torch.cat((feature, validity), dim=1)
     grid = F.affine_grid(affine, packed.size(), align_corners=align_corners)
+    if grid.device != packed.device or grid.dtype != packed.dtype:
+        raise RuntimeError("affine_grid output dtype/device does not match packed feature")
     warped = F.grid_sample(packed, grid, mode="bilinear", padding_mode="zeros",
                            align_corners=align_corners)
     warped_validity = warped[:, -1:].clamp(0.0, 1.0)
