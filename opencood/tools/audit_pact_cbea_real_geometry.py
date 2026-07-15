@@ -6,7 +6,6 @@ production convention and diagnoses three alternatives on the same real batch.
 from __future__ import print_function
 
 import argparse
-import copy
 import csv
 import json
 import math
@@ -183,6 +182,49 @@ def synthetic_agent_order_check():
     }
 
 
+def _alignment_result_summary(result):
+    if isinstance(result, dict):
+        return "dict keys={}".format(sorted(result.keys()))
+    if isinstance(result, (tuple, list)):
+        return "{} length={}".format(type(result).__name__, len(result))
+    if torch.is_tensor(result):
+        return "Tensor shape={}".format(tuple(result.shape))
+    return type(result).__name__
+
+
+def extract_aligned_geometry_fields(result):
+    """Extract the documented PACT geometry fields without changing result."""
+    # PACTCBEAEvidenceGeometryAligner.forward returns this dict.  Keep this
+    # contract strict so a future aligner API change cannot silently corrupt an
+    # audit report. Tuple/list/tensor are intentionally rejected: none is a
+    # valid return type for this production aligner.
+    if not isinstance(result, dict):
+        raise RuntimeError(
+            "PACT geometry aligner returned {}; expected dict with feature and validity".format(
+                _alignment_result_summary(result)
+            )
+        )
+    required = ("feature", "validity")
+    missing = [name for name in required if name not in result]
+    if missing:
+        raise RuntimeError(
+            "PACT geometry aligner result missing {} (available keys: {})".format(
+                ", ".join(missing), sorted(result.keys())
+            )
+        )
+    fields = {}
+    for name in required:
+        value = result[name]
+        if not torch.is_tensor(value):
+            raise RuntimeError(
+                "PACT geometry aligner field {} must be a Tensor; got {} (available keys: {})".format(
+                    name, type(value).__name__, sorted(result.keys())
+                )
+            )
+        fields[name] = value
+    return fields
+
+
 def _capture_model_geometry(model):
     """Install process-local wrappers; no production module is modified."""
     capture = {}
@@ -200,8 +242,9 @@ def _capture_model_geometry(model):
         capture["record_len"] = record_len.detach()
         capture["affine"] = affine_matrix.detach()
         result = original_geometry(feature, logits, uncertainty, descriptor, record_len, affine_matrix)
-        capture["aligned_feature"] = result[0].detach()
-        capture["aligned_validity"] = result[4].detach()
+        fields = extract_aligned_geometry_fields(result)
+        capture["aligned_feature"] = fields["feature"].detach()
+        capture["aligned_validity"] = fields["validity"].detach()
         return result
 
     model.pyramid_backbone.forward_single = forward_single_wrapper
@@ -251,6 +294,26 @@ def _gt_diagnostic(batch):
     }
 
 
+def resolve_checkpoint_path(model_dir, checkpoint=None):
+    """Resolve an explicit checkpoint once, relative to model_dir when needed."""
+    model_dir_abs = os.path.abspath(model_dir)
+    if checkpoint is None:
+        return os.path.join(model_dir_abs, "net_epoch1.pth")
+    if os.path.isabs(checkpoint):
+        return os.path.abspath(checkpoint)
+
+    checkpoint_from_cwd = os.path.abspath(checkpoint)
+    try:
+        already_under_model_dir = os.path.commonpath(
+            [model_dir_abs, checkpoint_from_cwd]
+        ) == model_dir_abs
+    except ValueError:
+        already_under_model_dir = False
+    if already_under_model_dir:
+        return checkpoint_from_cwd
+    return os.path.abspath(os.path.join(model_dir_abs, checkpoint))
+
+
 def audit_real_geometry(args):
     # Dataset/model imports are intentionally lazy so the CPU-only geometry smoke
     # can exercise the math without requiring every optional dataset dependency.
@@ -272,9 +335,7 @@ def audit_real_geometry(args):
 
     device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
     model = train_utils.create_model(hypes)
-    checkpoint_path = args.checkpoint or os.path.join(args.model_dir, "net_epoch1.pth")
-    if not os.path.isabs(checkpoint_path):
-        checkpoint_path = os.path.join(args.model_dir, checkpoint_path)
+    checkpoint_path = resolve_checkpoint_path(args.model_dir, args.checkpoint)
     if not os.path.isfile(checkpoint_path):
         raise RuntimeError(
             "Expected net_epoch1.pth or an explicit --checkpoint; not found: {}".format(checkpoint_path)

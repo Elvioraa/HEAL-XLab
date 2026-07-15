@@ -41,10 +41,16 @@ if "shapely" not in sys.modules:
 from opencood.tools.audit_pact_cbea_real_geometry import (
     CSV_FIELDS,
     _inverse_affine,
+    _capture_model_geometry,
     _write_outputs,
     build_candidate_affine,
+    extract_aligned_geometry_fields,
+    resolve_checkpoint_path,
     synthetic_agent_order_check,
     warp_feature_and_validity,
+)
+from opencood.models.sub_modules.pact_cbea_evidence_routed import (
+    PACTCBEAEvidenceGeometryAligner,
 )
 
 for _stub_name in _installed_smoke_stubs:
@@ -102,6 +108,99 @@ def _assert_only_new_files_changed():
     for path in changed:
         if any(path.endswith(marker) for marker in PROTECTED_MARKERS):
             raise AssertionError("protected production file changed: {}".format(path))
+
+
+def _identity_affine(batch, agent_count):
+    return torch.eye(2, 3).view(1, 1, 1, 2, 3).repeat(batch, agent_count, agent_count, 1, 1)
+
+
+def _assert_aligner_wrapper_contract():
+    feature = torch.arange(32, dtype=torch.float32).view(2, 2, 4, 2)
+    logits = torch.zeros((2, 1, 4, 2))
+    uncertainty = torch.ones((2, 1, 4, 2))
+    descriptor = torch.zeros((2, 1, 4, 2))
+    record_len = torch.tensor([2])
+    affine = _identity_affine(1, 2)
+    aligner = PACTCBEAEvidenceGeometryAligner(align_corners=False)
+    original_result = aligner(feature, logits, uncertainty, descriptor, record_len, affine)
+    expected_keys = {"feature", "heatmap_logits", "uncertainty", "descriptor", "validity", "debug"}
+    if not isinstance(original_result, dict) or set(original_result.keys()) != expected_keys:
+        raise AssertionError("real PACT geometry aligner contract changed")
+    extracted = extract_aligned_geometry_fields(original_result)
+    if set(extracted.keys()) != {"feature", "validity"}:
+        raise AssertionError("audit extraction did not select the documented fields")
+
+    class Pyramid(object):
+        def forward_single(self, tensor):
+            return tensor, []
+
+    class RecordingAligner(object):
+        def __init__(self):
+            self.last_result = None
+
+        def forward(self, *unused_args):
+            self.last_result = {
+                "feature": original_result["feature"],
+                "heatmap_logits": original_result["heatmap_logits"],
+                "uncertainty": original_result["uncertainty"],
+                "descriptor": original_result["descriptor"],
+                "validity": original_result["validity"],
+                "debug": original_result["debug"],
+            }
+            return self.last_result
+
+    class Model(object):
+        def __init__(self):
+            self.pyramid_backbone = Pyramid()
+            self.pact_geometry_aligner = RecordingAligner()
+
+    model = Model()
+    capture, original_single, original_geometry = _capture_model_geometry(model)
+    try:
+        wrapped_result = model.pact_geometry_aligner.forward(
+            feature, logits, uncertainty, descriptor, record_len, affine
+        )
+        if wrapped_result is not model.pact_geometry_aligner.last_result:
+            raise AssertionError("geometry wrapper replaced the original result object")
+        if type(wrapped_result) is not dict or set(wrapped_result.keys()) != expected_keys:
+            raise AssertionError("geometry wrapper changed return type or keys")
+        _assert_close(capture["aligned_feature"], original_result["feature"],
+                      "wrapper captured incorrect aligned feature")
+        _assert_close(capture["aligned_validity"], original_result["validity"],
+                      "wrapper captured incorrect validity")
+    finally:
+        model.pyramid_backbone.forward_single = original_single
+        model.pact_geometry_aligner.forward = original_geometry
+
+    for invalid_result in ((), [], torch.zeros(1), {"feature": feature}):
+        try:
+            extract_aligned_geometry_fields(invalid_result)
+        except RuntimeError as error:
+            if not str(error):
+                raise AssertionError("invalid geometry result error was not descriptive")
+        else:
+            raise AssertionError("invalid geometry result was silently accepted")
+
+
+def _assert_checkpoint_resolution():
+    with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+        model_dir = os.path.join(directory, "model")
+        os.makedirs(model_dir)
+        default_path = resolve_checkpoint_path(model_dir)
+        relative_path = resolve_checkpoint_path(model_dir, "net_epoch9.pth")
+        already_prefixed = os.path.relpath(
+            os.path.join(model_dir, "net_epoch8.pth"), ROOT
+        )
+        already_prefixed_path = resolve_checkpoint_path(model_dir, already_prefixed)
+        absolute_path = resolve_checkpoint_path(model_dir, os.path.join(model_dir, "net_epoch7.pth"))
+        if default_path != os.path.join(model_dir, "net_epoch1.pth"):
+            raise AssertionError("default checkpoint path was not model_dir/net_epoch1.pth")
+        if relative_path != os.path.join(model_dir, "net_epoch9.pth"):
+            raise AssertionError("relative checkpoint path was not resolved once")
+        if already_prefixed_path != os.path.join(model_dir, "net_epoch8.pth"):
+            raise AssertionError("already-prefixed checkpoint path was duplicated")
+        if absolute_path != os.path.join(model_dir, "net_epoch7.pth"):
+            raise AssertionError("absolute checkpoint path changed")
 
 
 def main():
@@ -172,6 +271,8 @@ def main():
         if "scenes" not in loaded or header != CSV_FIELDS:
             raise AssertionError("JSON/CSV output fields are incomplete")
 
+    _assert_aligner_wrapper_contract()
+    _assert_checkpoint_resolution()
     _assert_python38(AUDIT_PATH)
     _assert_python38(os.path.abspath(__file__))
     _assert_only_new_files_changed()
@@ -179,6 +280,7 @@ def main():
     print("candidate directions and inverse round-trip: OK")
     print("validity grid, record_len isolation, and agent order: OK")
     print("JSON/CSV fields and Python 3.8 AST: OK")
+    print("real aligner wrapper contract and checkpoint resolution: OK")
     print("PACT_CBEA_REAL_GEOMETRY_AUDIT_SMOKE_PASS")
 
 
