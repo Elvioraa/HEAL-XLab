@@ -5,6 +5,7 @@
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from opencood.models.sub_modules.base_bev_backbone_resnet import ResNetBEVBackbone
 from opencood.models.sub_modules.resblock import ResNetModified, Bottleneck, BasicBlock
@@ -14,7 +15,8 @@ from opencood.models.sub_modules.torch_transformation_utils import \
 from opencood.visualization.debug_plot import plot_feature
 
 
-def weighted_fuse(x, score, record_len, affine_matrix, align_corners):
+def weighted_fuse(x, score, record_len, affine_matrix, align_corners,
+                  cbea_alpha=None, cbea_lambda=0.0):
     """
     Parameters
     ----------
@@ -37,6 +39,18 @@ def weighted_fuse(x, score, record_len, affine_matrix, align_corners):
     split_x = regroup(x, record_len)
     # score = torch.sum(score, dim=1, keepdim=True)
     split_score = regroup(score, record_len)
+    use_cbea_prior = cbea_alpha is not None and float(cbea_lambda) != 0.0
+    split_cbea_alpha = None
+    if use_cbea_prior:
+        if not torch.is_tensor(cbea_alpha) or cbea_alpha.ndim != 4:
+            raise ValueError("cbea_alpha must have shape [sum(record_len), 1, H, W]")
+        if cbea_alpha.shape[1] != 1:
+            raise ValueError("cbea_alpha channel dimension must be 1")
+        if int(cbea_alpha.shape[0]) != int(torch.sum(record_len).item()):
+            raise ValueError("cbea_alpha agent count does not match record_len")
+        if not torch.isfinite(cbea_alpha).all().item():
+            raise ValueError("cbea_alpha contains NaN or Inf")
+        split_cbea_alpha = regroup(cbea_alpha, record_len)
     batch_node_features = split_x
     out = []
     # iterate each batch
@@ -51,7 +65,34 @@ def weighted_fuse(x, score, record_len, affine_matrix, align_corners):
         scores_in_ego = warp_affine_simple(split_score[b],
                                            t_matrix[i, :, :, :],
                                            (H, W), align_corners=align_corners)
-        scores_in_ego.masked_fill_(scores_in_ego == 0, -float('inf'))
+        if use_cbea_prior:
+            alpha_in_ego = split_cbea_alpha[b]
+            if int(alpha_in_ego.shape[0]) != int(N):
+                raise ValueError("cbea_alpha scene agent count does not match record_len")
+            alpha_in_ego = alpha_in_ego.to(
+                device=scores_in_ego.device,
+                dtype=scores_in_ego.dtype,
+            )
+            if alpha_in_ego.shape[-2:] != (H, W):
+                alpha_in_ego = F.interpolate(
+                    alpha_in_ego,
+                    size=(H, W),
+                    mode="bilinear",
+                    align_corners=False,
+                )
+            valid_mask = scores_in_ego != 0
+            relative_prior = int(N) * alpha_in_ego
+            gate = (1.0 - float(cbea_lambda)) + float(cbea_lambda) * relative_prior
+            gate = torch.clamp(gate, min=1e-6)
+            if not torch.isfinite(gate).all().item():
+                raise ValueError("CBEA multiscale prior gate contains NaN or Inf")
+            scores_in_ego = scores_in_ego * gate
+            scores_in_ego = scores_in_ego.masked_fill(
+                ~valid_mask,
+                -float('inf'),
+            )
+        else:
+            scores_in_ego.masked_fill_(scores_in_ego == 0, -float('inf'))
         scores_in_ego = torch.softmax(scores_in_ego, dim=0)
         scores_in_ego = torch.where(torch.isnan(scores_in_ego), 
                                     torch.zeros_like(scores_in_ego, device=scores_in_ego.device), 
@@ -101,7 +142,9 @@ class PyramidFusion(ResNetBEVBackbone):
 
         return final_feature, occ_map_list
     
-    def forward_collab(self, spatial_features, record_len, affine_matrix, agent_modality_list = None, cam_crop_info = None):
+    def forward_collab(self, spatial_features, record_len, affine_matrix,
+                       agent_modality_list=None, cam_crop_info=None,
+                       cbea_alpha=None, cbea_lambda=0.0):
         """
         spatial_features : torch.tensor
             [sum(record_len), C, H, W]
@@ -161,8 +204,16 @@ class PyramidFusion(ResNetBEVBackbone):
 
                 score = score * cam_crop_mask
 
-            fused_feature_list.append(weighted_fuse(feature_list[i], score, record_len, affine_matrix, self.align_corners))
+            fused_feature_list.append(weighted_fuse(
+                feature_list[i],
+                score,
+                record_len,
+                affine_matrix,
+                self.align_corners,
+                cbea_alpha=cbea_alpha,
+                cbea_lambda=cbea_lambda,
+            ))
         fused_feature = self.decode_multiscale_feature(fused_feature_list)
 
         
-        return fused_feature, occ_map_list 
+        return fused_feature, occ_map_list

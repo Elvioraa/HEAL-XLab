@@ -102,6 +102,8 @@ class HeterPyramidCollabPactCbea(HeterPyramidCollab):
         self.pact_use_stage3_joint_training = bool(
             self.pact_cbea_cfg.get("use_stage3_joint_training", False)
         )
+        self.pact_fusion_mode = self.pact_cbea_cfg["fusion_mode"]
+        self.pact_multiscale_prior_cfg = self.pact_cbea_cfg["multiscale_prior"]
         if self.pact_cbea_enabled:
             self.pact_cbea_rule = PACTCBEARule(self.pact_cbea_cfg)
             if self._pact_local_evidence_enabled():
@@ -114,6 +116,18 @@ class HeterPyramidCollabPactCbea(HeterPyramidCollab):
     def forward(self, data_dict):
         if not self.pact_cbea_enabled:
             return super().forward(data_dict)
+        pact_fusion_mode = getattr(self, "pact_fusion_mode", "legacy_rule")
+        pact_multiscale_prior_cfg = getattr(
+            self,
+            "pact_multiscale_prior_cfg",
+            {"enabled": False, "lambda": 0.0},
+        )
+        if (
+            pact_fusion_mode == "heal_multiscale_prior"
+            and pact_multiscale_prior_cfg["enabled"]
+            and self.training
+        ):
+            raise RuntimeError("heal_multiscale_prior is an inference-only mode")
 
         output_dict = {'pyramid': 'collab'}
         agent_modality_list = data_dict['agent_modality_list']
@@ -169,6 +183,20 @@ class HeterPyramidCollabPactCbea(HeterPyramidCollab):
         single_feature, single_occ_outputs = self.pyramid_backbone.forward_single(heter_feature_2d)
         if self.shrink_flag:
             single_feature = self.shrink_conv(single_feature)
+
+        if (
+            pact_fusion_mode == "heal_multiscale_prior"
+            and pact_multiscale_prior_cfg["enabled"]
+        ):
+            return self._forward_heal_multiscale_prior(
+                output_dict,
+                heter_feature_2d,
+                single_feature,
+                record_len,
+                affine_matrix,
+                data_dict.get("pairwise_t_matrix"),
+                agent_modality_list,
+            )
 
         base_fused_feature, occ_outputs = self.pyramid_backbone.forward_collab(
             heter_feature_2d,
@@ -251,6 +279,191 @@ class HeterPyramidCollabPactCbea(HeterPyramidCollab):
         })
         return output_dict
 
+    def _forward_heal_multiscale_prior(
+            self, output_dict, heter_feature_2d, single_feature,
+            record_len, affine_matrix, pairwise_t_matrix,
+            agent_modality_list):
+        if self.training:
+            raise RuntimeError("heal_multiscale_prior is an inference-only mode")
+
+        cbea_lambda = self.pact_multiscale_prior_cfg["lambda"]
+        cbea_alpha = None
+        multiscale_used = False
+        fallbacks = []
+
+        if cbea_lambda == 0.0:
+            fallbacks.append("lambda_zero_strict_heal_baseline")
+        else:
+            local_evidence = self._compute_local_evidence(
+                single_feature,
+                agent_modality_list,
+            )
+            if local_evidence is None:
+                fallbacks.append("missing_local_evidence_heal_fallback")
+            else:
+                warped_feature = self._warp_to_ego(
+                    single_feature,
+                    record_len,
+                    affine_matrix,
+                )
+                warped_logits = self._warp_to_ego(
+                    local_evidence["evidence_heatmap_logits"],
+                    record_len,
+                    affine_matrix,
+                )
+                warped_uncertainty = self._warp_to_ego(
+                    local_evidence["evidence_uncertainty"],
+                    record_len,
+                    affine_matrix,
+                )
+                _, rule_debug = self.pact_cbea_rule(
+                    warped_feature,
+                    evidence_heatmap=warped_logits,
+                    evidence_uncertainty=warped_uncertainty,
+                    record_len=record_len,
+                    pairwise_t_matrix=pairwise_t_matrix,
+                    modality_names=agent_modality_list,
+                )
+                cbea_alpha = self._flatten_pact_alpha(rule_debug, record_len)
+                if cbea_alpha is None:
+                    fallbacks.append("missing_pact_alpha_heal_fallback")
+                else:
+                    multiscale_used = True
+                    fallbacks.extend(rule_debug.get("pact_fallbacks", []))
+
+        if multiscale_used:
+            fused_feature, occ_outputs = self.pyramid_backbone.forward_collab(
+                heter_feature_2d,
+                record_len,
+                affine_matrix,
+                agent_modality_list,
+                self.cam_crop_info,
+                cbea_alpha=cbea_alpha,
+                cbea_lambda=cbea_lambda,
+            )
+        else:
+            fused_feature, occ_outputs = self.pyramid_backbone.forward_collab(
+                heter_feature_2d,
+                record_len,
+                affine_matrix,
+                agent_modality_list,
+                self.cam_crop_info,
+            )
+        if self.shrink_flag:
+            fused_feature = self.shrink_conv(fused_feature)
+
+        if self.supervise_single:
+            output_dict.update({
+                "cls_preds_single": self.cls_head(single_feature),
+                "reg_preds_single": self.reg_head(single_feature),
+                "dir_preds_single": self.dir_head(single_feature),
+            })
+
+        pact_debug = {
+            "pact_fusion_mode": "heal_multiscale_prior",
+            "pact_multiscale_prior_enabled": True,
+            "pact_multiscale_used": bool(multiscale_used),
+            "pact_multiscale_lambda": float(cbea_lambda),
+            "pact_multiscale_fallbacks": fallbacks,
+            "pact_multiscale_alpha_shape": (
+                list(cbea_alpha.shape) if cbea_alpha is not None else None
+            ),
+            "pact_multiscale_alpha_min": (
+                float(cbea_alpha.min().item()) if cbea_alpha is not None else None
+            ),
+            "pact_multiscale_alpha_max": (
+                float(cbea_alpha.max().item()) if cbea_alpha is not None else None
+            ),
+            "pact_multiscale_alpha_mean": (
+                float(cbea_alpha.mean().item()) if cbea_alpha is not None else None
+            ),
+            "pact_cbea_enabled": True,
+            "pact_trainable": bool(self.pact_cbea_trainable),
+            "pact_no_joint_training": bool(self.pact_no_joint_training),
+            "pact_use_stage3_joint_training": bool(
+                self.pact_use_stage3_joint_training
+            ),
+            "pact_local_evidence_enabled": bool(
+                self._pact_local_evidence_enabled()
+            ),
+        }
+        if self.pact_cbea_cfg.get("debug", False) and cbea_alpha is not None:
+            pact_debug["pact_multiscale_alpha"] = cbea_alpha.detach()
+
+        output_dict.update({
+            "cls_preds": self.cls_head(fused_feature),
+            "reg_preds": self.reg_head(fused_feature),
+            "dir_preds": self.dir_head(fused_feature),
+            "occ_single_list": occ_outputs,
+            "pact_cbea": pact_debug,
+        })
+        return output_dict
+
+    @staticmethod
+    def _flatten_pact_alpha(pact_debug, record_len):
+        if torch.is_tensor(record_len):
+            records = [
+                int(value) for value in record_len.detach().cpu().view(-1).tolist()
+            ]
+        else:
+            records = [int(value) for value in record_len]
+        if not records or any(value <= 0 for value in records):
+            raise ValueError("record_len must contain positive scene sizes")
+
+        group_debug = pact_debug.get("pact_group_debug")
+        if group_debug is not None:
+            if not isinstance(group_debug, (list, tuple)):
+                raise ValueError("pact_group_debug must be a list or tuple")
+            if len(group_debug) != len(records):
+                raise ValueError("pact_group_debug scene count does not match record_len")
+            flattened = []
+            for scene_index, (item, cav_num) in enumerate(zip(group_debug, records)):
+                if not isinstance(item, dict) or "pact_alpha" not in item:
+                    return None
+                alpha = item["pact_alpha"]
+                if not torch.is_tensor(alpha):
+                    raise ValueError("pact_alpha must be a tensor")
+                if alpha.ndim == 5 and alpha.shape[0] == 1:
+                    alpha = alpha[0]
+                if alpha.ndim != 4 or int(alpha.shape[0]) != cav_num:
+                    raise ValueError(
+                        "pact_alpha agent layout mismatch in scene %d" % scene_index
+                    )
+                flattened.append(alpha)
+            alpha = torch.cat(flattened, dim=0)
+        else:
+            alpha = pact_debug.get("pact_alpha")
+            if alpha is None:
+                return None
+            if not torch.is_tensor(alpha):
+                raise ValueError("pact_alpha must be a tensor")
+            if alpha.ndim == 5:
+                if len(records) == 1 and alpha.shape[0] == 1:
+                    alpha = alpha[0]
+                elif (
+                    alpha.shape[0] == len(records)
+                    and len(set(records)) == 1
+                    and alpha.shape[1] == records[0]
+                ):
+                    alpha = alpha.reshape(
+                        sum(records),
+                        alpha.shape[2],
+                        alpha.shape[3],
+                        alpha.shape[4],
+                    )
+                else:
+                    raise ValueError("pact_alpha batch layout does not match record_len")
+            if alpha.ndim != 4:
+                raise ValueError("pact_alpha must flatten to [N, 1, H, W]")
+
+        if int(alpha.shape[0]) != sum(records):
+            raise ValueError("flattened pact_alpha agent count does not match record_len")
+        if int(alpha.shape[1]) != 1:
+            raise ValueError("flattened pact_alpha channel dimension must be 1")
+        if not torch.isfinite(alpha).all().item():
+            raise ValueError("flattened pact_alpha contains NaN or Inf")
+        return alpha
+
     def _build_local_evidence_heads(self, args):
         head_cfg = self.pact_cbea_cfg["evidence_head"]
         for modality_name in self.modality_name_list:
@@ -332,6 +545,11 @@ class HeterPyramidCollabPactCbea(HeterPyramidCollab):
     def _normalize_pact_cfg(cls, cfg):
         normalized = PACTCBEARule._default_cfg()
         normalized.update({
+            "fusion_mode": "legacy_rule",
+            "multiscale_prior": {
+                "enabled": False,
+                "lambda": 0.0,
+            },
             "local_evidence": {
                 "enabled": False,
             },
@@ -362,6 +580,28 @@ class HeterPyramidCollabPactCbea(HeterPyramidCollab):
         head["use_sigmoid"] = bool(head.get("use_sigmoid", True))
         head["normalize_descriptor"] = bool(head.get("normalize_descriptor", True))
         head["return_feature"] = bool(head.get("return_feature", False))
+        fusion_mode = str(normalized.get("fusion_mode", "legacy_rule"))
+        if fusion_mode not in ("legacy_rule", "heal_multiscale_prior"):
+            raise ValueError(
+                "pact_cbea.fusion_mode must be legacy_rule or heal_multiscale_prior"
+            )
+        normalized["fusion_mode"] = fusion_mode
+        multiscale_prior = normalized.get("multiscale_prior")
+        if not isinstance(multiscale_prior, dict):
+            raise ValueError("pact_cbea.multiscale_prior must be a mapping")
+        multiscale_prior["enabled"] = bool(
+            multiscale_prior.get("enabled", False)
+        )
+        try:
+            multiscale_prior["lambda"] = float(
+                multiscale_prior.get("lambda", 0.0)
+            )
+        except (TypeError, ValueError):
+            raise ValueError("pact_cbea.multiscale_prior.lambda must be a float")
+        if not 0.0 <= multiscale_prior["lambda"] <= 1.0:
+            raise ValueError(
+                "pact_cbea.multiscale_prior.lambda must be in [0.0, 1.0]"
+            )
         if normalized["trainable"]:
             raise ValueError("PACT-CBEA v1 is parameter-free; pact_cbea.trainable must be false")
         if not normalized["no_joint_training"]:
