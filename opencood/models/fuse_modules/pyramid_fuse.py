@@ -16,23 +16,39 @@ from opencood.visualization.debug_plot import plot_feature
 
 
 def weighted_fuse(x, score, record_len, affine_matrix, align_corners,
-                  cbea_alpha=None, cbea_lambda=0.0):
+                  cbea_alpha=None, cbea_lambda=0.0, cbea_exclude_threshold=0.0):
     """
     Parameters
     ----------
     x : torch.Tensor
         input data, (sum(n_cav), C, H, W)
-    
+
     score : torch.Tensor
         score, (sum(n_cav), 1, H, W)
-        
+
     record_len : list
         shape: (B)
-        
+
     affine_matrix : torch.Tensor
         normalized affine matrix from 'normalize_pairwise_tfm'
-        shape: (B, L, L, 2, 3) 
+        shape: (B, L, L, 2, 3)
+
+    cbea_exclude_threshold : float
+        Relative-reliability floor tau in [0.0, 1.0). At a given pixel, an
+        agent whose N * alpha_i falls below tau is excluded from the
+        vehicle-dimension softmax entirely (score set to -inf) instead of
+        being continuously down-weighted. tau=0.0 (default) never triggers,
+        so this is bit-exact identical to the pre-existing gate-only
+        behavior. If excluding would leave zero valid agents at a pixel,
+        exclusion is skipped there and the pixel falls back to the
+        gate-only result, so this can never empty an otherwise non-empty
+        softmax.
     """
+
+    if not isinstance(cbea_exclude_threshold, (int, float)):
+        raise ValueError("cbea_exclude_threshold must be a number")
+    if float(cbea_exclude_threshold) < 0.0:
+        raise ValueError("cbea_exclude_threshold must be >= 0.0")
 
     _, C, H, W = x.shape
     B, L = affine_matrix.shape[:2]
@@ -91,6 +107,17 @@ def weighted_fuse(x, score, record_len, affine_matrix, align_corners,
                 ~valid_mask,
                 -float('inf'),
             )
+            if float(cbea_exclude_threshold) > 0.0:
+                exclude_candidate = valid_mask & (
+                    relative_prior < float(cbea_exclude_threshold)
+                )
+                remaining_valid = valid_mask & ~exclude_candidate
+                all_excluded = remaining_valid.sum(dim=0, keepdim=True) == 0
+                final_exclude = exclude_candidate & ~all_excluded
+                scores_in_ego = scores_in_ego.masked_fill(
+                    final_exclude,
+                    -float('inf'),
+                )
         else:
             scores_in_ego.masked_fill_(scores_in_ego == 0, -float('inf'))
         scores_in_ego = torch.softmax(scores_in_ego, dim=0)
@@ -144,7 +171,7 @@ class PyramidFusion(ResNetBEVBackbone):
     
     def forward_collab(self, spatial_features, record_len, affine_matrix,
                        agent_modality_list=None, cam_crop_info=None,
-                       cbea_alpha=None, cbea_lambda=0.0):
+                       cbea_alpha=None, cbea_lambda=0.0, cbea_exclude_threshold=0.0):
         """
         spatial_features : torch.tensor
             [sum(record_len), C, H, W]
@@ -212,6 +239,7 @@ class PyramidFusion(ResNetBEVBackbone):
                 self.align_corners,
                 cbea_alpha=cbea_alpha,
                 cbea_lambda=cbea_lambda,
+                cbea_exclude_threshold=cbea_exclude_threshold,
             ))
         fused_feature = self.decode_multiscale_feature(fused_feature_list)
 

@@ -182,6 +182,95 @@ def test_multiple_scene_layout():
     print("record_len=[2,3] scene isolation: True; output_batch: 2")
 
 
+def test_exclude_threshold_default_disabled_identity():
+    torch.manual_seed(17)
+    record_len = torch.tensor([3], dtype=torch.long)
+    feature = torch.randn(3, 3, 4, 5)
+    score = torch.sigmoid(torch.randn(3, 1, 4, 5)) + 1e-4
+    affine = identity_affine(1, 3)
+    alpha = torch.softmax(torch.randn(3, 1, 2, 3), dim=0)
+    without_threshold = weighted_fuse(
+        feature, score, record_len, affine, False,
+        cbea_alpha=alpha, cbea_lambda=1.0,
+    )
+    with_zero_threshold = weighted_fuse(
+        feature, score, record_len, affine, False,
+        cbea_alpha=alpha, cbea_lambda=1.0, cbea_exclude_threshold=0.0,
+    )
+    assert torch.equal(without_threshold, with_zero_threshold)
+    print("exclude_threshold=0.0 (default) torch.equal to gate-only: True")
+
+
+def test_exclude_threshold_excludes_low_reliability_agent():
+    record_len = torch.tensor([3], dtype=torch.long)
+    feature = torch.stack((
+        torch.full((1, 2, 2), 100.0),
+        torch.full((1, 2, 2), 10.0),
+        torch.zeros(1, 2, 2),
+    ))
+    score = torch.ones(3, 1, 2, 2)
+    affine = identity_affine(1, 3)
+    # agent 2 (index 2) gets a near-zero reliability share everywhere.
+    alpha = torch.tensor([0.49, 0.49, 0.02]).view(3, 1, 1, 1).expand(3, 1, 2, 2)
+    excluded_output = weighted_fuse(
+        feature, score, record_len, affine, False,
+        cbea_alpha=alpha, cbea_lambda=1.0, cbea_exclude_threshold=0.5,
+    )
+    baseline_without_weak_agent = weighted_fuse(
+        feature[:2], score[:2], torch.tensor([2]), identity_affine(1, 2), False,
+    )
+    difference = max_abs_diff(excluded_output, baseline_without_weak_agent)
+    assert difference < 1e-5
+    print(
+        "excluded weak agent matches (N-1)-agent baseline: True; "
+        "max_abs_diff: %.9g" % difference
+    )
+
+
+def test_exclude_threshold_never_empties_valid_set():
+    record_len = torch.tensor([2], dtype=torch.long)
+    feature = torch.stack((
+        torch.full((1, 2, 2), 5.0),
+        torch.full((1, 2, 2), 50.0),
+    ))
+    score = torch.ones(2, 1, 2, 2)
+    affine = identity_affine(1, 2)
+    # both agents fall below a high threshold everywhere.
+    alpha = torch.tensor([0.1, 0.05]).view(2, 1, 1, 1).expand(2, 1, 2, 2)
+    guarded_output = weighted_fuse(
+        feature, score, record_len, affine, False,
+        cbea_alpha=alpha, cbea_lambda=1.0, cbea_exclude_threshold=0.9,
+    )
+    gate_only_output = weighted_fuse(
+        feature, score, record_len, affine, False,
+        cbea_alpha=alpha, cbea_lambda=1.0,
+    )
+    assert_finite(guarded_output, "all-below-threshold output")
+    assert torch.equal(guarded_output, gate_only_output)
+    print(
+        "all-agents-below-threshold safety fallback (no empty softmax): True"
+    )
+
+
+def test_exclude_threshold_rejects_negative():
+    record_len = torch.tensor([2], dtype=torch.long)
+    feature = torch.randn(2, 2, 3, 3)
+    score = torch.sigmoid(torch.randn(2, 1, 3, 3)) + 1e-4
+    affine = identity_affine(1, 2)
+    alpha = torch.full((2, 1, 1, 1), 0.5)
+    try:
+        weighted_fuse(
+            feature, score, record_len, affine, False,
+            cbea_alpha=alpha, cbea_lambda=1.0, cbea_exclude_threshold=-0.1,
+        )
+    except ValueError:
+        rejected = True
+    else:
+        rejected = False
+    assert rejected
+    print("negative exclude_threshold rejected: True")
+
+
 def test_alpha_flattening():
     direct = torch.rand(1, 2, 1, 4, 5)
     flattened_direct = HeterPyramidCollabPactCbea._flatten_pact_alpha(
@@ -224,17 +313,21 @@ def test_config_normalization():
     assert default_cfg["multiscale_prior"] == {
         "enabled": False,
         "lambda": 0.0,
+        "exclude_threshold": 0.0,
     }
     configured = HeterPyramidCollabPactCbea._normalize_pact_cfg({
         "fusion_mode": "heal_multiscale_prior",
-        "multiscale_prior": {"enabled": 1, "lambda": "0.5"},
+        "multiscale_prior": {"enabled": 1, "lambda": "0.5", "exclude_threshold": "0.3"},
     })
     assert configured["multiscale_prior"]["enabled"] is True
     assert configured["multiscale_prior"]["lambda"] == 0.5
+    assert configured["multiscale_prior"]["exclude_threshold"] == 0.3
     for invalid in (
         {"fusion_mode": "invalid"},
         {"multiscale_prior": {"lambda": -0.1}},
         {"multiscale_prior": {"lambda": 1.1}},
+        {"multiscale_prior": {"exclude_threshold": -0.1}},
+        {"multiscale_prior": {"exclude_threshold": 1.0}},
     ):
         try:
             HeterPyramidCollabPactCbea._normalize_pact_cfg(invalid)
@@ -257,7 +350,7 @@ class _FakePyramidBackbone(object):
 
 
 class _BranchHarness(object):
-    def __init__(self, cbea_lambda, local_evidence):
+    def __init__(self, cbea_lambda, local_evidence, exclude_threshold=0.0):
         self.training = False
         self.supervise_single = False
         self.shrink_flag = False
@@ -265,6 +358,7 @@ class _BranchHarness(object):
         self.pact_multiscale_prior_cfg = {
             "enabled": True,
             "lambda": float(cbea_lambda),
+            "exclude_threshold": float(exclude_threshold),
         }
         self.pact_cbea_cfg = {"debug": False}
         self.pact_cbea_trainable = False
@@ -349,13 +443,15 @@ def test_model_branch_selection():
         missing_output["pact_cbea"]["pact_multiscale_fallbacks"]
     )
 
-    active = _BranchHarness(1.0, local_evidence={})
+    active = _BranchHarness(1.0, local_evidence={}, exclude_threshold=0.4)
     active_output = _run_model_branch(active)
     assert active.evidence_calls == 1
     assert active.rule_calls == 1
     assert active.pyramid_backbone.last_kwargs["cbea_lambda"] == 1.0
+    assert active.pyramid_backbone.last_kwargs["cbea_exclude_threshold"] == 0.4
     assert active.pyramid_backbone.last_kwargs["cbea_alpha"].shape == (2, 1, 3, 3)
     assert active_output["pact_cbea"]["pact_multiscale_used"] is True
+    assert active_output["pact_cbea"]["pact_multiscale_exclude_threshold"] == 0.4
     print("model branch lambda=0/evidence fallback/active prior routing: True")
 
 
@@ -365,6 +461,10 @@ def main():
     test_single_cav_identity()
     test_nonuniform_alpha_changes_output()
     test_multiple_scene_layout()
+    test_exclude_threshold_default_disabled_identity()
+    test_exclude_threshold_excludes_low_reliability_agent()
+    test_exclude_threshold_never_empties_valid_set()
+    test_exclude_threshold_rejects_negative()
     test_alpha_flattening()
     test_config_normalization()
     test_model_branch_selection()
