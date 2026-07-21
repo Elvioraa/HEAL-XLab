@@ -116,6 +116,9 @@ class HeterPyramidCollabPactCbeaStage1(HeterPyramidCollab):
                     use_sigmoid=bool(head_cfg.get("use_sigmoid", True)),
                     normalize_descriptor=bool(head_cfg.get("normalize_descriptor", True)),
                     return_feature=bool(head_cfg.get("return_feature", True)),
+                    predict_localization_uncertainty=bool(
+                        head_cfg["localization_uncertainty"].get("enabled", False)
+                    ),
                 ),
             )
             self._pact_stage1_modality = modality_name
@@ -227,6 +230,13 @@ class HeterPyramidCollabPactCbeaStage1(HeterPyramidCollab):
             ]
         if "evidence_feature" in head_output:
             output_dict["pact_cbea"]["evidence_feature"] = head_output["evidence_feature"]
+        if "evidence_localization_uncertainty" in head_output:
+            output_dict["pact_cbea"]["evidence_localization_uncertainty_logits"] = (
+                head_output["evidence_localization_uncertainty_logits"]
+            )
+            output_dict["pact_cbea"]["evidence_localization_uncertainty"] = head_output[
+                "evidence_localization_uncertainty"
+            ]
         return output_dict
 
     def _is_stage1_local_evidence_enabled(self):
@@ -278,10 +288,19 @@ class HeterPyramidCollabPactCbeaStage1(HeterPyramidCollab):
         head["normalize_descriptor"] = bool(head.get("normalize_descriptor", True))
         head["return_feature"] = bool(head.get("return_feature", True))
         head["return_descriptor"] = bool(head.get("return_descriptor", False))
+        loc_unc_head = head["localization_uncertainty"]
+        loc_unc_head["enabled"] = bool(
+            loc_unc_head.get("enabled", False) or loc_unc_head.get("enable", False)
+        )
         loss = normalized["evidence_loss"]
         loss["enabled"] = bool(loss.get("enabled", False) or loss.get("enable", False))
         loss["mode"] = str(loss.get("mode", "pact_local_evidence"))
-        for term, default_weight in (("evidence_heatmap", 0.01), ("uncertainty", 0.001), ("descriptor", 0.001)):
+        for term, default_weight in (
+            ("evidence_heatmap", 0.01),
+            ("uncertainty", 0.001),
+            ("descriptor", 0.001),
+            ("localization_uncertainty", 0.001),
+        ):
             item = loss[term]
             item["enabled"] = bool(item.get("enabled", False) or item.get("enable", False))
             item["weight"] = float(item.get("weight", default_weight))
@@ -311,6 +330,9 @@ class HeterPyramidCollabPactCbeaStage1(HeterPyramidCollab):
                 "normalize_descriptor": True,
                 "return_feature": True,
                 "return_descriptor": False,
+                "localization_uncertainty": {
+                    "enabled": False,
+                },
             },
             "evidence_loss": {
                 "enabled": False,
@@ -325,6 +347,10 @@ class HeterPyramidCollabPactCbeaStage1(HeterPyramidCollab):
                     "weight": 0.001,
                 },
                 "descriptor": {
+                    "enabled": False,
+                    "weight": 0.001,
+                },
+                "localization_uncertainty": {
                     "enabled": False,
                     "weight": 0.001,
                 },

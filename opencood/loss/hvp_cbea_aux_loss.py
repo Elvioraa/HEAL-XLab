@@ -297,6 +297,10 @@ def default_hvp_v3_stage2_evidence_loss_cfg():
             "enabled": False,
             "weight": 0.001,
         },
+        "localization_uncertainty": {
+            "enabled": False,
+            "weight": 0.001,
+        },
     }
 
 
@@ -322,6 +326,11 @@ def normalize_hvp_v3_stage2_evidence_loss_cfg(cfg):
         descriptor.get("enabled", False) or descriptor.get("enable", False)
     )
     descriptor["weight"] = float(descriptor.get("weight", 0.001))
+    loc_unc = normalized["localization_uncertainty"]
+    loc_unc["enabled"] = bool(
+        loc_unc.get("enabled", False) or loc_unc.get("enable", False)
+    )
+    loc_unc["weight"] = float(loc_unc.get("weight", 0.001))
     return normalized
 
 
@@ -421,7 +430,7 @@ def compute_hvp_v3_loss(hvp_v3_dict, target_dict=None, fallback_on_error=True):
 
 
 def compute_pact_cbea_local_evidence_loss(pact_dict, target_dict=None,
-                                          fallback_on_error=True):
+                                          fallback_on_error=True, reg_preds=None):
     cfg = normalize_hvp_v3_stage2_evidence_loss_cfg(
         (pact_dict or {}).get("evidence_loss_cfg")
     )
@@ -483,6 +492,28 @@ def compute_pact_cbea_local_evidence_loss(pact_dict, target_dict=None,
             weighted = descriptor_loss * descriptor_cfg["weight"]
             losses.append(weighted)
             stats["pact_cbea_descriptor_loss"] = _item(weighted)
+
+        loc_unc_cfg = cfg["localization_uncertainty"]
+        if loc_unc_cfg.get("enabled", False):
+            loc_uncertainty = _require_tensor(
+                pact_dict, "evidence_localization_uncertainty",
+            )
+            if not torch.is_tensor(reg_preds):
+                raise ValueError("reg_preds is required for localization_uncertainty loss")
+            reg_targets_flat = target_dict["targets"].view(
+                reg_preds.shape[0], -1, 7,
+            )
+            residual_map = _regression_residual_map(
+                reg_preds, reg_targets_flat, loc_uncertainty,
+            )
+            fg_mask = _resize_positive_map(target, loc_uncertainty)
+            denom = torch.clamp(fg_mask.sum(), min=1.0)
+            loc_unc_loss = (
+                torch.abs(loc_uncertainty.float() - residual_map) * fg_mask.float()
+            ).sum() / denom
+            weighted = loc_unc_loss * loc_unc_cfg["weight"]
+            losses.append(weighted)
+            stats["pact_cbea_localization_uncertainty_loss"] = _item(weighted)
 
         total = sum(losses, zero)
         if not torch.isfinite(total):
@@ -667,6 +698,38 @@ def _resize_positive_map(pos_map, ref_tensor):
     return pos_map.clamp(0.0, 1.0)
 
 
+def _regression_residual_map(reg_preds, reg_targets_flat, ref_tensor):
+    """Build a detached [B,1,H,W] per-pixel regression-residual magnitude map.
+
+    reg_preds : torch.Tensor, [B, anchors*7, H, W]
+    reg_targets_flat : torch.Tensor, [B, H*W*anchors, 7]
+    ref_tensor : reference tensor whose spatial size the output should match.
+    """
+    if not torch.is_tensor(reg_preds) or reg_preds.ndim != 4:
+        raise ValueError("reg_preds must be a [B,anchors*7,H,W] tensor")
+    if not torch.is_tensor(reg_targets_flat) or reg_targets_flat.ndim != 3:
+        raise ValueError("reg_targets must be a [B,H*W*anchors,7] tensor")
+    batch_size, channels, height, width = reg_preds.shape
+    if channels % 7 != 0:
+        raise ValueError("reg_preds channel dimension must be a multiple of 7")
+    anchors = channels // 7
+    reg_preds_flat = reg_preds.permute(0, 2, 3, 1).contiguous().view(
+        batch_size, height * width * anchors, 7,
+    )
+    if reg_targets_flat.shape[:2] != reg_preds_flat.shape[:2]:
+        raise ValueError("reg_targets shape does not match reg_preds anchor layout")
+    residual = torch.abs(
+        reg_preds_flat.float().detach() - reg_targets_flat.float().detach()
+    ).mean(dim=-1)
+    residual_map = residual.view(batch_size, height, width, anchors).mean(dim=-1)
+    residual_map = residual_map.unsqueeze(1)
+    if residual_map.shape[-2:] != ref_tensor.shape[-2:]:
+        residual_map = F.interpolate(
+            residual_map, size=ref_tensor.shape[-2:], mode="nearest",
+        )
+    return residual_map.detach()
+
+
 def _hypothesis_heatmap_loss(hmap, target, cfg):
     hmap = hmap.float()
     target = target.float()
@@ -777,6 +840,7 @@ def _zero_pact_local_evidence_stats():
         "pact_cbea_evidence_heatmap_loss": 0.0,
         "pact_cbea_uncertainty_loss": 0.0,
         "pact_cbea_descriptor_loss": 0.0,
+        "pact_cbea_localization_uncertainty_loss": 0.0,
         "pact_cbea_fg_ratio": 0.0,
         "pact_cbea_target_source": "",
         "pact_cbea_fallback_reason": "",

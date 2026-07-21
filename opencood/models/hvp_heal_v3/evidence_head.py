@@ -10,11 +10,12 @@ class HvpHealV3EvidenceHead(nn.Module):
 
     def __init__(self, in_channels=256, hidden_dim=64, descriptor_dim=16,
                  use_sigmoid=True, normalize_descriptor=True,
-                 return_feature=True):
+                 return_feature=True, predict_localization_uncertainty=False):
         super().__init__()
         self.use_sigmoid = bool(use_sigmoid)
         self.normalize_descriptor = bool(normalize_descriptor)
         self.return_feature = bool(return_feature)
+        self.predict_localization_uncertainty = bool(predict_localization_uncertainty)
         self.stem = nn.Sequential(
             nn.Conv2d(in_channels, hidden_dim, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(hidden_dim),
@@ -30,6 +31,10 @@ class HvpHealV3EvidenceHead(nn.Module):
             descriptor_dim,
             kernel_size=1,
         )
+        if self.predict_localization_uncertainty:
+            self.evidence_localization_uncertainty_head = nn.Conv2d(
+                hidden_dim, 1, kernel_size=1,
+            )
 
     def forward(self, bev_feature):
         if bev_feature is None or bev_feature.ndim != 4:
@@ -52,4 +57,11 @@ class HvpHealV3EvidenceHead(nn.Module):
         }
         if self.return_feature:
             output["evidence_feature"] = evidence_feature
+        if self.predict_localization_uncertainty:
+            loc_uncertainty_logits = self.evidence_localization_uncertainty_head(
+                evidence_feature
+            )
+            loc_uncertainty = F.softplus(loc_uncertainty_logits) + 1e-6
+            output["evidence_localization_uncertainty_logits"] = loc_uncertainty_logits
+            output["evidence_localization_uncertainty"] = loc_uncertainty
         return output

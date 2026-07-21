@@ -240,6 +240,13 @@ class HeterPyramidCollabPactCbea(HeterPyramidCollab):
                 record_len,
                 affine_matrix,
             )
+            warped_loc_uncertainty = None
+            if "evidence_localization_uncertainty" in local_evidence:
+                warped_loc_uncertainty = self._warp_to_ego(
+                    local_evidence["evidence_localization_uncertainty"],
+                    record_len,
+                    affine_matrix,
+                )
             pact_feature, pact_debug = self.pact_cbea_rule(
                 warped_feature,
                 evidence_heatmap=warped_logits,
@@ -247,6 +254,7 @@ class HeterPyramidCollabPactCbea(HeterPyramidCollab):
                 record_len=record_len,
                 pairwise_t_matrix=data_dict.get("pairwise_t_matrix"),
                 modality_names=agent_modality_list,
+                evidence_localization_uncertainty=warped_loc_uncertainty,
             )
             pact_debug.update({
                 "pact_features_warped_to_ego": True,
@@ -316,6 +324,13 @@ class HeterPyramidCollabPactCbea(HeterPyramidCollab):
                     record_len,
                     affine_matrix,
                 )
+                warped_loc_uncertainty = None
+                if "evidence_localization_uncertainty" in local_evidence:
+                    warped_loc_uncertainty = self._warp_to_ego(
+                        local_evidence["evidence_localization_uncertainty"],
+                        record_len,
+                        affine_matrix,
+                    )
                 _, rule_debug = self.pact_cbea_rule(
                     warped_feature,
                     evidence_heatmap=warped_logits,
@@ -323,6 +338,7 @@ class HeterPyramidCollabPactCbea(HeterPyramidCollab):
                     record_len=record_len,
                     pairwise_t_matrix=pairwise_t_matrix,
                     modality_names=agent_modality_list,
+                    evidence_localization_uncertainty=warped_loc_uncertainty,
                 )
                 cbea_alpha = self._flatten_pact_alpha(rule_debug, record_len)
                 if cbea_alpha is None:
@@ -487,6 +503,9 @@ class HeterPyramidCollabPactCbea(HeterPyramidCollab):
                     use_sigmoid=bool(head_cfg.get("use_sigmoid", True)),
                     normalize_descriptor=bool(head_cfg.get("normalize_descriptor", True)),
                     return_feature=bool(head_cfg.get("return_feature", False)),
+                    predict_localization_uncertainty=bool(
+                        head_cfg["localization_uncertainty"].get("enabled", False)
+                    ),
                 ),
             )
 
@@ -496,6 +515,8 @@ class HeterPyramidCollabPactCbea(HeterPyramidCollab):
         logits = []
         heatmaps = []
         uncertainties = []
+        loc_uncertainties = []
+        all_have_loc_uncertainty = True
         for idx, modality_name in enumerate(agent_modality_list):
             head_name = f"pact_cbea_evidence_head_{modality_name}"
             if not hasattr(self, head_name):
@@ -504,11 +525,18 @@ class HeterPyramidCollabPactCbea(HeterPyramidCollab):
             logits.append(head_output["evidence_heatmap_logits"])
             heatmaps.append(head_output["evidence_heatmap"])
             uncertainties.append(head_output["evidence_uncertainty"])
-        return {
+            if "evidence_localization_uncertainty" in head_output:
+                loc_uncertainties.append(head_output["evidence_localization_uncertainty"])
+            else:
+                all_have_loc_uncertainty = False
+        result = {
             "evidence_heatmap_logits": torch.cat(logits, dim=0),
             "evidence_heatmap": torch.cat(heatmaps, dim=0),
             "evidence_uncertainty": torch.cat(uncertainties, dim=0),
         }
+        if all_have_loc_uncertainty and loc_uncertainties:
+            result["evidence_localization_uncertainty"] = torch.cat(loc_uncertainties, dim=0)
+        return result
 
     def _warp_to_ego(self, tensor, record_len, affine_matrix):
         _, _, height, width = tensor.shape
@@ -573,6 +601,9 @@ class HeterPyramidCollabPactCbea(HeterPyramidCollab):
                 "use_sigmoid": True,
                 "normalize_descriptor": True,
                 "return_feature": False,
+                "localization_uncertainty": {
+                    "enabled": False,
+                },
             },
         })
         if isinstance(cfg, bool):
@@ -592,6 +623,10 @@ class HeterPyramidCollabPactCbea(HeterPyramidCollab):
         head["use_sigmoid"] = bool(head.get("use_sigmoid", True))
         head["normalize_descriptor"] = bool(head.get("normalize_descriptor", True))
         head["return_feature"] = bool(head.get("return_feature", False))
+        loc_unc_head = head["localization_uncertainty"]
+        loc_unc_head["enabled"] = bool(
+            loc_unc_head.get("enabled", False) or loc_unc_head.get("enable", False)
+        )
         fusion_mode = str(normalized.get("fusion_mode", "legacy_rule"))
         if fusion_mode not in ("legacy_rule", "heal_multiscale_prior"):
             raise ValueError(

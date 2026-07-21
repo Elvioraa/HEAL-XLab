@@ -156,6 +156,7 @@ class PointPillarLoss(nn.Module):
                     output_dict["pact_cbea"],
                     target_dict=target_dict,
                     fallback_on_error=True,
+                    reg_preds=output_dict.get("reg_preds"),
                 )
                 if (
                     torch.is_tensor(pact_loss)

@@ -19,7 +19,8 @@ class PACTCBEARule(nn.Module):
 
     def forward(self, features, evidence_heatmap=None, evidence_uncertainty=None,
                 evidence_descriptor=None, record_len=None, pairwise_t_matrix=None,
-                modality_names=None, modality_ids=None):
+                modality_names=None, modality_ids=None,
+                evidence_localization_uncertainty=None):
         feature_tensor, input_layout = self._feature_tensor(features)
         if feature_tensor.ndim == 4:
             return self._forward_flat(
@@ -32,6 +33,7 @@ class PACTCBEARule(nn.Module):
                 modality_names,
                 modality_ids,
                 input_layout,
+                evidence_localization_uncertainty,
             )
         return self._aggregate_dense(
             feature_tensor,
@@ -42,11 +44,13 @@ class PACTCBEARule(nn.Module):
             modality_names,
             modality_ids,
             input_layout,
+            evidence_localization_uncertainty,
         )
 
     def _forward_flat(self, feature_tensor, evidence_heatmap, evidence_uncertainty,
                       evidence_descriptor, record_len, pairwise_t_matrix,
-                      modality_names, modality_ids, input_layout):
+                      modality_names, modality_ids, input_layout,
+                      evidence_localization_uncertainty=None):
         record_list = self._record_list(record_len, int(feature_tensor.shape[0]))
         if len(record_list) == 1:
             return self._aggregate_dense(
@@ -58,6 +62,7 @@ class PACTCBEARule(nn.Module):
                 modality_names,
                 modality_ids,
                 input_layout,
+                evidence_localization_uncertainty,
             )
 
         outputs = []
@@ -70,6 +75,9 @@ class PACTCBEARule(nn.Module):
             group_hmap = self._slice_evidence(evidence_heatmap, start, end)
             group_unc = self._slice_evidence(evidence_uncertainty, start, end)
             group_desc = self._slice_evidence(evidence_descriptor, start, end)
+            group_loc_unc = self._slice_evidence(
+                evidence_localization_uncertainty, start, end,
+            )
             enhanced, debug = self._aggregate_dense(
                 feature_tensor[start:end].unsqueeze(0),
                 group_hmap,
@@ -79,6 +87,7 @@ class PACTCBEARule(nn.Module):
                 group_modalities,
                 group_ids,
                 "%s_group%d" % (input_layout, batch_idx),
+                group_loc_unc,
             )
             outputs.append(enhanced[0])
             debug_items.append(debug)
@@ -87,7 +96,7 @@ class PACTCBEARule(nn.Module):
 
     def _aggregate_dense(self, feature_tensor, evidence_heatmap, evidence_uncertainty,
                          evidence_descriptor, pairwise_t_matrix, modality_names, modality_ids,
-                         input_layout):
+                         input_layout, evidence_localization_uncertainty=None):
         if feature_tensor.ndim != 5:
             raise ValueError("PACT-CBEA features must be [N,C,H,W] or [B,N,C,H,W]")
         batch_size, agent_count, _, height, width = feature_tensor.shape
@@ -146,8 +155,21 @@ class PACTCBEARule(nn.Module):
             dtype,
             fallbacks,
         )
+        localization_weight = self._localization_weight(
+            evidence_localization_uncertainty,
+            batch_size,
+            agent_count,
+            height,
+            width,
+            device,
+            dtype,
+            fallbacks,
+        )
 
-        reliability = confidence * uncertainty_weight * modality_prior * spatial_weight * descriptor_weight
+        reliability = (
+            confidence * uncertainty_weight * modality_prior * spatial_weight
+            * descriptor_weight * localization_weight
+        )
         reliability = torch.nan_to_num(reliability, nan=0.0, posinf=0.0, neginf=0.0)
         reliability = torch.clamp(reliability, min=0.0)
         denom = reliability.sum(dim=1, keepdim=True)
@@ -173,6 +195,7 @@ class PACTCBEARule(nn.Module):
             "pact_modality_prior": modality_prior,
             "pact_spatial_weight": spatial_weight,
             "pact_descriptor_weight": descriptor_weight,
+            "pact_localization_weight": localization_weight,
             "pact_fallbacks": fallbacks,
             "pact_agent_count": int(agent_count),
             "pact_trainable": False,
@@ -205,6 +228,22 @@ class PACTCBEARule(nn.Module):
         uncertainty = torch.clamp(uncertainty, min=self.uncertainty_min, max=self.uncertainty_max)
         weight = torch.exp(-uncertainty)
         return weight ** float(self.cfg["weights"].get("uncertainty", 1.0))
+
+    def _localization_weight(self, evidence_localization_uncertainty, batch_size,
+                             agent_count, height, width, device, dtype, fallbacks):
+        if not self.cfg["aggregation"].get("localization_weight", False):
+            fallbacks.append("localization_weight_disabled")
+            return torch.ones(batch_size, agent_count, 1, height, width, device=device, dtype=dtype)
+        if evidence_localization_uncertainty is None:
+            fallbacks.append("missing_evidence_localization_uncertainty_weight_ones")
+            return torch.ones(batch_size, agent_count, 1, height, width, device=device, dtype=dtype)
+        loc_uncertainty = self._evidence_tensor(
+            evidence_localization_uncertainty, batch_size, agent_count, height, width,
+            device, dtype, fallbacks, "evidence_localization_uncertainty",
+        )
+        loc_uncertainty = torch.clamp(loc_uncertainty, min=self.uncertainty_min, max=self.uncertainty_max)
+        weight = torch.exp(-loc_uncertainty)
+        return weight ** float(self.cfg["weights"].get("localization", 1.0))
 
     def _spatial_weight(self, evidence_heatmap, confidence, pairwise_t_matrix,
                         batch_size, agent_count, height, width, device, dtype,
@@ -436,6 +475,7 @@ class PACTCBEARule(nn.Module):
             "pact_modality_prior",
             "pact_spatial_weight",
             "pact_descriptor_weight",
+            "pact_localization_weight",
         ):
             values = [item.get(key) for item in debug_items]
             if all(torch.is_tensor(value) for value in values):
@@ -462,7 +502,7 @@ class PACTCBEARule(nn.Module):
         normalized["plug_and_play"] = bool(normalized.get("plug_and_play", True))
         for key, value in list(normalized["aggregation"].items()):
             normalized["aggregation"][key] = bool(value)
-        for key in ("evidence", "uncertainty", "spatial", "descriptor"):
+        for key in ("evidence", "uncertainty", "spatial", "descriptor", "localization"):
             normalized["weights"][key] = float(normalized["weights"].get(key, 1.0))
         if not isinstance(normalized["weights"].get("modality_prior"), dict):
             normalized["weights"]["modality_prior"] = {}
@@ -488,12 +528,14 @@ class PACTCBEARule(nn.Module):
                 "descriptor_consistency": False,
                 "spatial_consistency": True,
                 "modality_prior": True,
+                "localization_weight": False,
             },
             "weights": {
                 "evidence": 1.0,
                 "uncertainty": 1.0,
                 "spatial": 1.0,
                 "descriptor": 0.0,
+                "localization": 1.0,
                 "modality_prior": {
                     "m1": 1.0,
                     "m2": 1.0,
