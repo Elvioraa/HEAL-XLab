@@ -15,8 +15,18 @@ from opencood.models.sub_modules.torch_transformation_utils import \
 from opencood.visualization.debug_plot import plot_feature
 
 
+def _softmax_nan_to_zero(scores):
+    weights = torch.softmax(scores, dim=0)
+    return torch.where(
+        torch.isnan(weights),
+        torch.zeros_like(weights),
+        weights,
+    )
+
+
 def weighted_fuse(x, score, record_len, affine_matrix, align_corners,
-                  cbea_alpha=None, cbea_lambda=0.0, cbea_exclude_threshold=0.0):
+                  cbea_alpha=None, cbea_lambda=0.0, cbea_exclude_threshold=0.0,
+                  cbea_exclude_floor_mix=0.0):
     """
     Parameters
     ----------
@@ -43,12 +53,24 @@ def weighted_fuse(x, score, record_len, affine_matrix, align_corners,
         exclusion is skipped there and the pixel falls back to the
         gate-only result, so this can never empty an otherwise non-empty
         softmax.
+
+    cbea_exclude_floor_mix : float
+        Blend factor mu in [0.0, 1.0] between the hard-excluded softmax
+        weights and the gate-only (no exclusion) softmax weights:
+        w_final = (1 - mu) * w_hard + mu * w_gate_only. mu=0.0 (default)
+        reproduces the hard-exclusion result bit-for-bit; mu=1.0
+        reproduces the tau=0.0 gate-only result bit-for-bit. Only has an
+        effect when cbea_exclude_threshold > 0.0.
     """
 
     if not isinstance(cbea_exclude_threshold, (int, float)):
         raise ValueError("cbea_exclude_threshold must be a number")
     if float(cbea_exclude_threshold) < 0.0:
         raise ValueError("cbea_exclude_threshold must be >= 0.0")
+    if not isinstance(cbea_exclude_floor_mix, (int, float)):
+        raise ValueError("cbea_exclude_floor_mix must be a number")
+    if not 0.0 <= float(cbea_exclude_floor_mix) <= 1.0:
+        raise ValueError("cbea_exclude_floor_mix must be in [0.0, 1.0]")
 
     _, C, H, W = x.shape
     B, L = affine_matrix.shape[:2]
@@ -102,11 +124,9 @@ def weighted_fuse(x, score, record_len, affine_matrix, align_corners,
             gate = torch.clamp(gate, min=1e-6)
             if not torch.isfinite(gate).all().item():
                 raise ValueError("CBEA multiscale prior gate contains NaN or Inf")
-            scores_in_ego = scores_in_ego * gate
-            scores_in_ego = scores_in_ego.masked_fill(
-                ~valid_mask,
-                -float('inf'),
-            )
+            gated_scores = scores_in_ego * gate
+            gated_scores = gated_scores.masked_fill(~valid_mask, -float('inf'))
+
             if float(cbea_exclude_threshold) > 0.0:
                 exclude_candidate = valid_mask & (
                     relative_prior < float(cbea_exclude_threshold)
@@ -114,16 +134,21 @@ def weighted_fuse(x, score, record_len, affine_matrix, align_corners,
                 remaining_valid = valid_mask & ~exclude_candidate
                 all_excluded = remaining_valid.sum(dim=0, keepdim=True) == 0
                 final_exclude = exclude_candidate & ~all_excluded
-                scores_in_ego = scores_in_ego.masked_fill(
-                    final_exclude,
-                    -float('inf'),
-                )
+                hard_scores = gated_scores.masked_fill(final_exclude, -float('inf'))
+                scores_in_ego = _softmax_nan_to_zero(hard_scores)
+
+                floor_mix = float(cbea_exclude_floor_mix)
+                if floor_mix > 0.0:
+                    gate_only_weights = _softmax_nan_to_zero(gated_scores)
+                    scores_in_ego = (
+                        (1.0 - floor_mix) * scores_in_ego
+                        + floor_mix * gate_only_weights
+                    )
+            else:
+                scores_in_ego = _softmax_nan_to_zero(gated_scores)
         else:
             scores_in_ego.masked_fill_(scores_in_ego == 0, -float('inf'))
-        scores_in_ego = torch.softmax(scores_in_ego, dim=0)
-        scores_in_ego = torch.where(torch.isnan(scores_in_ego), 
-                                    torch.zeros_like(scores_in_ego, device=scores_in_ego.device), 
-                                    scores_in_ego)
+            scores_in_ego = _softmax_nan_to_zero(scores_in_ego)
 
         out.append(torch.sum(feature_in_ego * scores_in_ego, dim=0))
     out = torch.stack(out)
@@ -171,7 +196,8 @@ class PyramidFusion(ResNetBEVBackbone):
     
     def forward_collab(self, spatial_features, record_len, affine_matrix,
                        agent_modality_list=None, cam_crop_info=None,
-                       cbea_alpha=None, cbea_lambda=0.0, cbea_exclude_threshold=0.0):
+                       cbea_alpha=None, cbea_lambda=0.0, cbea_exclude_threshold=0.0,
+                       cbea_exclude_floor_mix=0.0):
         """
         spatial_features : torch.tensor
             [sum(record_len), C, H, W]
@@ -240,6 +266,7 @@ class PyramidFusion(ResNetBEVBackbone):
                 cbea_alpha=cbea_alpha,
                 cbea_lambda=cbea_lambda,
                 cbea_exclude_threshold=cbea_exclude_threshold,
+                cbea_exclude_floor_mix=cbea_exclude_floor_mix,
             ))
         fused_feature = self.decode_multiscale_feature(fused_feature_list)
 

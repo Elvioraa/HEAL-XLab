@@ -334,6 +334,9 @@ class HeterPyramidCollabPactCbea(HeterPyramidCollab):
         cbea_exclude_threshold = float(
             self.pact_multiscale_prior_cfg.get("exclude_threshold", 0.0)
         )
+        cbea_exclude_floor_mix = float(
+            self.pact_multiscale_prior_cfg.get("exclude_floor_mix", 0.0)
+        )
         if multiscale_used:
             fused_feature, occ_outputs = self.pyramid_backbone.forward_collab(
                 heter_feature_2d,
@@ -344,6 +347,7 @@ class HeterPyramidCollabPactCbea(HeterPyramidCollab):
                 cbea_alpha=cbea_alpha,
                 cbea_lambda=cbea_lambda,
                 cbea_exclude_threshold=cbea_exclude_threshold,
+                cbea_exclude_floor_mix=cbea_exclude_floor_mix,
             )
         else:
             fused_feature, occ_outputs = self.pyramid_backbone.forward_collab(
@@ -369,6 +373,7 @@ class HeterPyramidCollabPactCbea(HeterPyramidCollab):
             "pact_multiscale_used": bool(multiscale_used),
             "pact_multiscale_lambda": float(cbea_lambda),
             "pact_multiscale_exclude_threshold": cbea_exclude_threshold,
+            "pact_multiscale_exclude_floor_mix": cbea_exclude_floor_mix,
             "pact_multiscale_fallbacks": fallbacks,
             "pact_multiscale_alpha_shape": (
                 list(cbea_alpha.shape) if cbea_alpha is not None else None
@@ -555,6 +560,7 @@ class HeterPyramidCollabPactCbea(HeterPyramidCollab):
                 "enabled": False,
                 "lambda": 0.0,
                 "exclude_threshold": 0.0,
+                "exclude_floor_mix": 0.0,
             },
             "local_evidence": {
                 "enabled": False,
@@ -619,6 +625,18 @@ class HeterPyramidCollabPactCbea(HeterPyramidCollab):
         if not 0.0 <= multiscale_prior["exclude_threshold"] < 1.0:
             raise ValueError(
                 "pact_cbea.multiscale_prior.exclude_threshold must be in [0.0, 1.0)"
+            )
+        try:
+            multiscale_prior["exclude_floor_mix"] = float(
+                multiscale_prior.get("exclude_floor_mix", 0.0)
+            )
+        except (TypeError, ValueError):
+            raise ValueError(
+                "pact_cbea.multiscale_prior.exclude_floor_mix must be a float"
+            )
+        if not 0.0 <= multiscale_prior["exclude_floor_mix"] <= 1.0:
+            raise ValueError(
+                "pact_cbea.multiscale_prior.exclude_floor_mix must be in [0.0, 1.0]"
             )
         if normalized["trainable"]:
             raise ValueError("PACT-CBEA v1 is parameter-free; pact_cbea.trainable must be false")

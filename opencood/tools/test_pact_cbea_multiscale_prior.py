@@ -271,6 +271,106 @@ def test_exclude_threshold_rejects_negative():
     print("negative exclude_threshold rejected: True")
 
 
+def test_exclude_floor_mix_boundary_identities():
+    record_len = torch.tensor([3], dtype=torch.long)
+    feature = torch.stack((
+        torch.full((1, 2, 2), 100.0),
+        torch.full((1, 2, 2), 10.0),
+        torch.zeros(1, 2, 2),
+    ))
+    score = torch.ones(3, 1, 2, 2)
+    affine = identity_affine(1, 3)
+    alpha = torch.tensor([0.49, 0.49, 0.02]).view(3, 1, 1, 1).expand(3, 1, 2, 2)
+
+    hard_only = weighted_fuse(
+        feature, score, record_len, affine, False,
+        cbea_alpha=alpha, cbea_lambda=1.0, cbea_exclude_threshold=0.5,
+    )
+    floor_zero = weighted_fuse(
+        feature, score, record_len, affine, False,
+        cbea_alpha=alpha, cbea_lambda=1.0, cbea_exclude_threshold=0.5,
+        cbea_exclude_floor_mix=0.0,
+    )
+    assert torch.equal(hard_only, floor_zero)
+
+    gate_only = weighted_fuse(
+        feature, score, record_len, affine, False,
+        cbea_alpha=alpha, cbea_lambda=1.0,
+    )
+    floor_one = weighted_fuse(
+        feature, score, record_len, affine, False,
+        cbea_alpha=alpha, cbea_lambda=1.0, cbea_exclude_threshold=0.5,
+        cbea_exclude_floor_mix=1.0,
+    )
+    diff = max_abs_diff(gate_only, floor_one)
+    assert diff < 1e-5
+    print(
+        "exclude_floor_mix boundary identities (mu=0 -> hard, mu=1 -> gate-only): "
+        "True; mu=1 max_abs_diff: %.9g" % diff
+    )
+
+
+def test_exclude_floor_mix_monotonic_blend():
+    record_len = torch.tensor([3], dtype=torch.long)
+    feature = torch.stack((
+        torch.full((1, 2, 2), 100.0),
+        torch.full((1, 2, 2), 10.0),
+        torch.zeros(1, 2, 2),
+    ))
+    score = torch.ones(3, 1, 2, 2)
+    affine = identity_affine(1, 3)
+    alpha = torch.tensor([0.49, 0.49, 0.02]).view(3, 1, 1, 1).expand(3, 1, 2, 2)
+
+    values = []
+    for mu in (0.0, 0.25, 0.5, 0.75, 1.0):
+        output = weighted_fuse(
+            feature, score, record_len, affine, False,
+            cbea_alpha=alpha, cbea_lambda=1.0, cbea_exclude_threshold=0.5,
+            cbea_exclude_floor_mix=mu,
+        )
+        values.append(float(output.mean().item()))
+    for earlier, later in zip(values, values[1:]):
+        assert later < earlier
+    print("exclude_floor_mix monotonic blend across mu=0..1: True; means: %s" % values)
+
+
+def test_exclude_floor_mix_inert_when_threshold_zero():
+    record_len = torch.tensor([2], dtype=torch.long)
+    feature = torch.randn(2, 2, 3, 3)
+    score = torch.sigmoid(torch.randn(2, 1, 3, 3)) + 1e-4
+    affine = identity_affine(1, 2)
+    alpha = torch.full((2, 1, 1, 1), 0.5)
+    baseline = weighted_fuse(
+        feature, score, record_len, affine, False,
+        cbea_alpha=alpha, cbea_lambda=1.0,
+    )
+    with_floor_mix = weighted_fuse(
+        feature, score, record_len, affine, False,
+        cbea_alpha=alpha, cbea_lambda=1.0, cbea_exclude_floor_mix=0.7,
+    )
+    assert torch.equal(baseline, with_floor_mix)
+    print("exclude_floor_mix inert when exclude_threshold=0.0: True")
+
+
+def test_exclude_floor_mix_rejects_out_of_range():
+    record_len = torch.tensor([2], dtype=torch.long)
+    feature = torch.randn(2, 2, 3, 3)
+    score = torch.sigmoid(torch.randn(2, 1, 3, 3)) + 1e-4
+    affine = identity_affine(1, 2)
+    alpha = torch.full((2, 1, 1, 1), 0.5)
+    for bad_value in (-0.1, 1.1):
+        try:
+            weighted_fuse(
+                feature, score, record_len, affine, False,
+                cbea_alpha=alpha, cbea_lambda=1.0, cbea_exclude_threshold=0.5,
+                cbea_exclude_floor_mix=bad_value,
+            )
+        except ValueError:
+            continue
+        raise AssertionError("out-of-range exclude_floor_mix was accepted")
+    print("exclude_floor_mix out-of-range rejected: True")
+
+
 def test_alpha_flattening():
     direct = torch.rand(1, 2, 1, 4, 5)
     flattened_direct = HeterPyramidCollabPactCbea._flatten_pact_alpha(
@@ -314,20 +414,27 @@ def test_config_normalization():
         "enabled": False,
         "lambda": 0.0,
         "exclude_threshold": 0.0,
+        "exclude_floor_mix": 0.0,
     }
     configured = HeterPyramidCollabPactCbea._normalize_pact_cfg({
         "fusion_mode": "heal_multiscale_prior",
-        "multiscale_prior": {"enabled": 1, "lambda": "0.5", "exclude_threshold": "0.3"},
+        "multiscale_prior": {
+            "enabled": 1, "lambda": "0.5", "exclude_threshold": "0.3",
+            "exclude_floor_mix": "0.4",
+        },
     })
     assert configured["multiscale_prior"]["enabled"] is True
     assert configured["multiscale_prior"]["lambda"] == 0.5
     assert configured["multiscale_prior"]["exclude_threshold"] == 0.3
+    assert configured["multiscale_prior"]["exclude_floor_mix"] == 0.4
     for invalid in (
         {"fusion_mode": "invalid"},
         {"multiscale_prior": {"lambda": -0.1}},
         {"multiscale_prior": {"lambda": 1.1}},
         {"multiscale_prior": {"exclude_threshold": -0.1}},
         {"multiscale_prior": {"exclude_threshold": 1.0}},
+        {"multiscale_prior": {"exclude_floor_mix": -0.1}},
+        {"multiscale_prior": {"exclude_floor_mix": 1.1}},
     ):
         try:
             HeterPyramidCollabPactCbea._normalize_pact_cfg(invalid)
@@ -350,7 +457,8 @@ class _FakePyramidBackbone(object):
 
 
 class _BranchHarness(object):
-    def __init__(self, cbea_lambda, local_evidence, exclude_threshold=0.0):
+    def __init__(self, cbea_lambda, local_evidence, exclude_threshold=0.0,
+                 exclude_floor_mix=0.0):
         self.training = False
         self.supervise_single = False
         self.shrink_flag = False
@@ -359,6 +467,7 @@ class _BranchHarness(object):
             "enabled": True,
             "lambda": float(cbea_lambda),
             "exclude_threshold": float(exclude_threshold),
+            "exclude_floor_mix": float(exclude_floor_mix),
         }
         self.pact_cbea_cfg = {"debug": False}
         self.pact_cbea_trainable = False
@@ -443,15 +552,19 @@ def test_model_branch_selection():
         missing_output["pact_cbea"]["pact_multiscale_fallbacks"]
     )
 
-    active = _BranchHarness(1.0, local_evidence={}, exclude_threshold=0.4)
+    active = _BranchHarness(
+        1.0, local_evidence={}, exclude_threshold=0.4, exclude_floor_mix=0.6,
+    )
     active_output = _run_model_branch(active)
     assert active.evidence_calls == 1
     assert active.rule_calls == 1
     assert active.pyramid_backbone.last_kwargs["cbea_lambda"] == 1.0
     assert active.pyramid_backbone.last_kwargs["cbea_exclude_threshold"] == 0.4
+    assert active.pyramid_backbone.last_kwargs["cbea_exclude_floor_mix"] == 0.6
     assert active.pyramid_backbone.last_kwargs["cbea_alpha"].shape == (2, 1, 3, 3)
     assert active_output["pact_cbea"]["pact_multiscale_used"] is True
     assert active_output["pact_cbea"]["pact_multiscale_exclude_threshold"] == 0.4
+    assert active_output["pact_cbea"]["pact_multiscale_exclude_floor_mix"] == 0.6
     print("model branch lambda=0/evidence fallback/active prior routing: True")
 
 
@@ -465,6 +578,10 @@ def main():
     test_exclude_threshold_excludes_low_reliability_agent()
     test_exclude_threshold_never_empties_valid_set()
     test_exclude_threshold_rejects_negative()
+    test_exclude_floor_mix_boundary_identities()
+    test_exclude_floor_mix_monotonic_blend()
+    test_exclude_floor_mix_inert_when_threshold_zero()
+    test_exclude_floor_mix_rejects_out_of_range()
     test_alpha_flattening()
     test_config_normalization()
     test_model_branch_selection()
