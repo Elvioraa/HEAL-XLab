@@ -122,6 +122,14 @@ class HeterPyramidCollabPactCbeaStage1(HeterPyramidCollab):
                 ),
             )
             self._pact_stage1_modality = modality_name
+            self._pact_evidence_attach_to = str(
+                self.pact_cbea_cfg["evidence_head"].get("attach_to", "fused")
+            )
+            if self._pact_evidence_attach_to == "single" and not self.supervise_single:
+                raise ValueError(
+                    "pact_cbea.evidence_head.attach_to=single requires "
+                    "supervise_single=true so the per-agent single feature exists"
+                )
             check_trainable_module(self)
 
     def forward(self, data_dict):
@@ -210,12 +218,22 @@ class HeterPyramidCollabPactCbeaStage1(HeterPyramidCollab):
             "occ_single_list": occ_outputs,
         })
         head = getattr(self, "pact_cbea_evidence_head_%s" % self._pact_stage1_modality)
-        head_output = head(fused_feature)
+        attach_to = getattr(self, "_pact_evidence_attach_to", "fused")
+        if attach_to == "single":
+            # Match Stage2 (heter_pyramid_single_pact_cbea) and collab inference,
+            # which both apply the evidence head to the per-agent pre-fusion
+            # feature. single_feature is guaranteed present because attach_to=
+            # single requires supervise_single=true (validated in __init__).
+            evidence_input = single_feature
+        else:
+            evidence_input = fused_feature
+        head_output = head(evidence_input)
         output_dict["pact_cbea"] = {
             "enabled": True,
             "stage": "local_evidence",
             "train_mode": self.pact_cbea_cfg["local_evidence"]["train_mode"],
             "modality": self._pact_stage1_modality,
+            "attach_to": attach_to,
             "global_rule_trainable": False,
             "use_stage3_joint_training": False,
             "evidence_heatmap_logits": head_output["evidence_heatmap_logits"],
@@ -288,6 +306,11 @@ class HeterPyramidCollabPactCbeaStage1(HeterPyramidCollab):
         head["normalize_descriptor"] = bool(head.get("normalize_descriptor", True))
         head["return_feature"] = bool(head.get("return_feature", True))
         head["return_descriptor"] = bool(head.get("return_descriptor", False))
+        head["attach_to"] = str(head.get("attach_to", "fused"))
+        if head["attach_to"] not in ("fused", "single"):
+            raise ValueError(
+                "pact_cbea.evidence_head.attach_to must be 'fused' or 'single'"
+            )
         loc_unc_head = head["localization_uncertainty"]
         loc_unc_head["enabled"] = bool(
             loc_unc_head.get("enabled", False) or loc_unc_head.get("enable", False)
@@ -330,6 +353,7 @@ class HeterPyramidCollabPactCbeaStage1(HeterPyramidCollab):
                 "normalize_descriptor": True,
                 "return_feature": True,
                 "return_descriptor": False,
+                "attach_to": "fused",
                 "localization_uncertainty": {
                     "enabled": False,
                 },
@@ -353,6 +377,7 @@ class HeterPyramidCollabPactCbeaStage1(HeterPyramidCollab):
                 "localization_uncertainty": {
                     "enabled": False,
                     "weight": 0.001,
+                    "max_residual": 10.0,
                 },
             },
         }

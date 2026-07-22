@@ -151,7 +151,13 @@ class PointPillarLoss(nn.Module):
                 if torch.is_tensor(hvp_v3_loss):
                     total_loss += hvp_v3_loss
                 self.loss_dict.update(hvp_v3_stats)
-            if "pact_cbea" in output_dict:
+            # attach_to='single' routes the evidence loss through the _single
+            # supervision path instead (per-agent feature + per-agent target),
+            # so it is skipped here. Default 'fused' keeps the original path.
+            if (
+                "pact_cbea" in output_dict
+                and output_dict["pact_cbea"].get("attach_to", "fused") != "single"
+            ):
                 pact_loss, pact_stats = compute_pact_cbea_local_evidence_loss(
                     output_dict["pact_cbea"],
                     target_dict=target_dict,

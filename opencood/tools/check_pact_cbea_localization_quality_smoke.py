@@ -210,6 +210,79 @@ def test_pact_local_evidence_loss_localization_uncertainty_missing_reg_preds_fal
     print("pact local evidence loss missing reg_preds safe fallback: True")
 
 
+def test_regression_residual_map_clamps_large_and_nonfinite():
+    ref_tensor = torch.zeros(1, 1, 2, 2)
+    # Huge finite residual is clamped to max_residual.
+    reg_preds = torch.full((1, 7, 2, 2), 1000.0)
+    reg_targets_flat = torch.zeros(1, 4, 7)
+    residual_map = _regression_residual_map(
+        reg_preds, reg_targets_flat, ref_tensor, max_residual=10.0,
+    )
+    assert float(residual_map.max()) <= 10.0 + 1e-6
+    # Non-finite predictions are sanitized, not propagated.
+    reg_preds_bad = torch.full((1, 7, 2, 2), float("inf"))
+    residual_bad = _regression_residual_map(
+        reg_preds_bad, reg_targets_flat, ref_tensor, max_residual=10.0,
+    )
+    assert torch.isfinite(residual_bad).all().item()
+    assert float(residual_bad.max()) <= 10.0 + 1e-6
+    print("regression residual map clamps large/non-finite target: True")
+
+
+def test_localization_loss_stays_finite_with_huge_residual():
+    batch_size, height, width, anchors = 1, 2, 2, 1
+    pos_equal_one = torch.zeros(batch_size, height, width, anchors)
+    pos_equal_one[0, 0, 0, 0] = 1.0
+    target_dict = {
+        "pos_equal_one": pos_equal_one,
+        # A wildly large regression target that would previously blow up.
+        "targets": torch.full((batch_size, height * width * anchors, 7), 1e6),
+    }
+    reg_preds = torch.zeros(batch_size, anchors * 7, height, width)
+    loc_uncertainty = torch.full((batch_size, 1, height, width), 0.5)
+    pact_dict = {
+        "enabled": True,
+        "stage": "local_evidence",
+        "evidence_heatmap_logits": torch.zeros(batch_size, 1, height, width),
+        "evidence_uncertainty": torch.zeros(batch_size, 1, height, width),
+        "evidence_localization_uncertainty": loc_uncertainty,
+        "evidence_loss_cfg": {
+            "enabled": True,
+            "mode": "pact_local_evidence",
+            "localization_uncertainty": {
+                "enabled": True, "weight": 1.0, "max_residual": 10.0,
+            },
+        },
+    }
+    loss, stats = compute_pact_cbea_local_evidence_loss(
+        pact_dict, target_dict=target_dict, reg_preds=reg_preds,
+    )
+    assert torch.isfinite(loss).item()
+    assert stats["pact_cbea_fallback_reason"] == ""
+    # residual target clamped to 10.0, prediction 0.5 -> loss ~ 9.5.
+    assert abs(stats["pact_cbea_localization_uncertainty_loss"] - 9.5) < 1e-3
+    print("localization loss stays finite with huge residual (clamped): True")
+
+
+def test_stage1_attach_to_default_and_validation():
+    default_cfg = HeterPyramidCollabPactCbeaStage1._normalize_pact_stage1_cfg({})
+    assert default_cfg["evidence_head"]["attach_to"] == "fused"
+    single_cfg = HeterPyramidCollabPactCbeaStage1._normalize_pact_stage1_cfg({
+        "evidence_head": {"attach_to": "single"},
+    })
+    assert single_cfg["evidence_head"]["attach_to"] == "single"
+    try:
+        HeterPyramidCollabPactCbeaStage1._normalize_pact_stage1_cfg({
+            "evidence_head": {"attach_to": "bogus"},
+        })
+    except ValueError:
+        rejected = True
+    else:
+        rejected = False
+    assert rejected
+    print("stage1 attach_to default 'fused' and invalid-value rejection: True")
+
+
 def test_stage1_config_normalization_defaults_and_validation():
     default_cfg = HeterPyramidCollabPactCbeaStage1._normalize_pact_stage1_cfg({})
     assert default_cfg["evidence_head"]["localization_uncertainty"]["enabled"] is False
@@ -238,6 +311,9 @@ def main():
     test_pact_local_evidence_loss_localization_uncertainty()
     test_pact_local_evidence_loss_localization_uncertainty_default_off()
     test_pact_local_evidence_loss_localization_uncertainty_missing_reg_preds_fallback()
+    test_regression_residual_map_clamps_large_and_nonfinite()
+    test_localization_loss_stays_finite_with_huge_residual()
+    test_stage1_attach_to_default_and_validation()
     test_stage1_config_normalization_defaults_and_validation()
     print("PACT_CBEA_LOCALIZATION_QUALITY_SMOKE_PASS")
 

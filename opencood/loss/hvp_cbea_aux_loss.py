@@ -300,6 +300,7 @@ def default_hvp_v3_stage2_evidence_loss_cfg():
         "localization_uncertainty": {
             "enabled": False,
             "weight": 0.001,
+            "max_residual": 10.0,
         },
     }
 
@@ -331,6 +332,11 @@ def normalize_hvp_v3_stage2_evidence_loss_cfg(cfg):
         loc_unc.get("enabled", False) or loc_unc.get("enable", False)
     )
     loc_unc["weight"] = float(loc_unc.get("weight", 0.001))
+    loc_unc["max_residual"] = float(loc_unc.get("max_residual", 10.0))
+    if loc_unc["max_residual"] <= 0.0:
+        raise ValueError(
+            "localization_uncertainty.max_residual must be a positive float"
+        )
     return normalized
 
 
@@ -500,20 +506,32 @@ def compute_pact_cbea_local_evidence_loss(pact_dict, target_dict=None,
             )
             if not torch.is_tensor(reg_preds):
                 raise ValueError("reg_preds is required for localization_uncertainty loss")
+            max_residual = float(loc_unc_cfg.get("max_residual", 10.0))
             reg_targets_flat = target_dict["targets"].view(
                 reg_preds.shape[0], -1, 7,
             )
             residual_map = _regression_residual_map(
                 reg_preds, reg_targets_flat, loc_uncertainty,
+                max_residual=max_residual,
+            )
+            # Bound the prediction side too, so an early softplus blow-up cannot
+            # produce a non-finite gradient that Adam then propagates forever.
+            loc_uncertainty_bounded = torch.clamp(
+                loc_uncertainty.float(), max=max_residual,
             )
             fg_mask = _resize_positive_map(target, loc_uncertainty)
             denom = torch.clamp(fg_mask.sum(), min=1.0)
             loc_unc_loss = (
-                torch.abs(loc_uncertainty.float() - residual_map) * fg_mask.float()
+                torch.abs(loc_uncertainty_bounded - residual_map) * fg_mask.float()
             ).sum() / denom
-            weighted = loc_unc_loss * loc_unc_cfg["weight"]
-            losses.append(weighted)
-            stats["pact_cbea_localization_uncertainty_loss"] = _item(weighted)
+            if not torch.isfinite(loc_unc_loss):
+                # Skip only this term instead of poisoning the whole update.
+                stats["pact_cbea_localization_uncertainty_loss"] = 0.0
+                stats["pact_cbea_localization_uncertainty_skipped"] = True
+            else:
+                weighted = loc_unc_loss * loc_unc_cfg["weight"]
+                losses.append(weighted)
+                stats["pact_cbea_localization_uncertainty_loss"] = _item(weighted)
 
         total = sum(losses, zero)
         if not torch.isfinite(total):
@@ -698,17 +716,27 @@ def _resize_positive_map(pos_map, ref_tensor):
     return pos_map.clamp(0.0, 1.0)
 
 
-def _regression_residual_map(reg_preds, reg_targets_flat, ref_tensor):
+def _regression_residual_map(reg_preds, reg_targets_flat, ref_tensor,
+                             max_residual=10.0):
     """Build a detached [B,1,H,W] per-pixel regression-residual magnitude map.
 
     reg_preds : torch.Tensor, [B, anchors*7, H, W]
     reg_targets_flat : torch.Tensor, [B, H*W*anchors, 7]
     ref_tensor : reference tensor whose spatial size the output should match.
+    max_residual : float
+        Upper bound the raw-unit residual target is clamped to. Raw regression
+        residuals are unbounded and can be very large early in training, which
+        makes the softplus localization head chase an exploding target and go
+        numerically unstable (observed as a NaN head bias). Clamping bounds the
+        supervision target; combined with a nan_to_num guard the target is
+        always finite and in [0, max_residual].
     """
     if not torch.is_tensor(reg_preds) or reg_preds.ndim != 4:
         raise ValueError("reg_preds must be a [B,anchors*7,H,W] tensor")
     if not torch.is_tensor(reg_targets_flat) or reg_targets_flat.ndim != 3:
         raise ValueError("reg_targets must be a [B,H*W*anchors,7] tensor")
+    if not max_residual > 0.0:
+        raise ValueError("max_residual must be a positive float")
     batch_size, channels, height, width = reg_preds.shape
     if channels % 7 != 0:
         raise ValueError("reg_preds channel dimension must be a multiple of 7")
@@ -727,6 +755,10 @@ def _regression_residual_map(reg_preds, reg_targets_flat, ref_tensor):
         residual_map = F.interpolate(
             residual_map, size=ref_tensor.shape[-2:], mode="nearest",
         )
+    residual_map = torch.nan_to_num(
+        residual_map, nan=0.0, posinf=float(max_residual), neginf=0.0,
+    )
+    residual_map = residual_map.clamp(min=0.0, max=float(max_residual))
     return residual_map.detach()
 
 
@@ -841,6 +873,7 @@ def _zero_pact_local_evidence_stats():
         "pact_cbea_uncertainty_loss": 0.0,
         "pact_cbea_descriptor_loss": 0.0,
         "pact_cbea_localization_uncertainty_loss": 0.0,
+        "pact_cbea_localization_uncertainty_skipped": False,
         "pact_cbea_fg_ratio": 0.0,
         "pact_cbea_target_source": "",
         "pact_cbea_fallback_reason": "",

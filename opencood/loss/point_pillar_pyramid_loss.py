@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from opencood.loss.point_pillar_depth_loss import PointPillarDepthLoss
 from opencood.loss.point_pillar_loss import sigmoid_focal_loss
+from opencood.loss.hvp_cbea_aux_loss import compute_pact_cbea_local_evidence_loss
 
 class PointPillarPyramidLoss(PointPillarDepthLoss):
     def __init__(self, args):
@@ -61,6 +62,29 @@ class PointPillarPyramidLoss(PointPillarDepthLoss):
             'pyramid_loss': occ_loss.item(),
             'total_loss': total_loss.item()
         }
+
+        # When the evidence head is attached to the per-agent single feature,
+        # its supervision belongs here: this branch receives the per-agent
+        # single target (label_dict_single) and reg_preds_single, which match
+        # the per-agent evidence tensors. attach_to='fused' (default) leaves
+        # this untouched and keeps the loss in the collab (suffix="") path.
+        if (
+            "pact_cbea" in output_dict
+            and output_dict["pact_cbea"].get("attach_to", "fused") == "single"
+        ):
+            pact_loss, pact_stats = compute_pact_cbea_local_evidence_loss(
+                output_dict["pact_cbea"],
+                target_dict=target_dict,
+                fallback_on_error=True,
+                reg_preds=output_dict.get("reg_preds_single"),
+            )
+            if (
+                torch.is_tensor(pact_loss)
+                and pact_stats.get("pact_cbea_local_evidence_enabled", False)
+            ):
+                total_loss = total_loss + pact_loss
+            self.loss_dict.update(pact_stats)
+            self.loss_dict['total_loss'] = total_loss.item()
 
         return total_loss
 
