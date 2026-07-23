@@ -24,6 +24,9 @@ from opencood.models.sub_modules.pact_cbea_rule import PACTCBEARule
 from opencood.models.heter_pyramid_collab_pact_cbea_stage1 import (
     HeterPyramidCollabPactCbeaStage1,
 )
+from opencood.models.heter_pyramid_single_pact_cbea import (
+    HeterPyramidSinglePactCbea,
+)
 from opencood.loss.hvp_cbea_aux_loss import (
     compute_pact_cbea_local_evidence_loss,
     _regression_residual_map,
@@ -301,6 +304,28 @@ def test_stage1_config_normalization_defaults_and_validation():
     print("stage1 config normalization defaults/validation: True")
 
 
+def test_stage2_single_config_normalization_localization():
+    default_cfg = HeterPyramidSinglePactCbea._normalize_pact_local_cfg({})
+    assert default_cfg["evidence_head"]["localization_uncertainty"]["enabled"] is False
+    assert default_cfg["evidence_loss"]["localization_uncertainty"]["enabled"] is False
+    assert default_cfg["evidence_loss"]["localization_uncertainty"]["weight"] == 0.001
+    assert default_cfg["evidence_loss"]["localization_uncertainty"]["max_residual"] == 10.0
+
+    configured = HeterPyramidSinglePactCbea._normalize_pact_local_cfg({
+        "evidence_head": {"localization_uncertainty": {"enabled": True}},
+        "evidence_loss": {
+            "localization_uncertainty": {
+                "enabled": True, "weight": "0.5", "max_residual": "8",
+            },
+        },
+    })
+    assert configured["evidence_head"]["localization_uncertainty"]["enabled"] is True
+    assert configured["evidence_loss"]["localization_uncertainty"]["enabled"] is True
+    assert configured["evidence_loss"]["localization_uncertainty"]["weight"] == 0.5
+    assert configured["evidence_loss"]["localization_uncertainty"]["max_residual"] == 8.0
+    print("stage2 single config normalization localization defaults/override: True")
+
+
 def main():
     test_evidence_head_default_unchanged()
     test_evidence_head_localization_uncertainty_enabled()
@@ -315,6 +340,7 @@ def main():
     test_localization_loss_stays_finite_with_huge_residual()
     test_stage1_attach_to_default_and_validation()
     test_stage1_config_normalization_defaults_and_validation()
+    test_stage2_single_config_normalization_localization()
     print("PACT_CBEA_LOCALIZATION_QUALITY_SMOKE_PASS")
 
 

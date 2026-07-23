@@ -105,6 +105,9 @@ class HeterPyramidSinglePactCbea(HeterPyramidSingle):
                     use_sigmoid=bool(head_cfg.get("use_sigmoid", True)),
                     normalize_descriptor=bool(head_cfg.get("normalize_descriptor", True)),
                     return_feature=bool(head_cfg.get("return_feature", True)),
+                    predict_localization_uncertainty=bool(
+                        head_cfg["localization_uncertainty"].get("enabled", False)
+                    ),
                 ),
             )
             self._pact_local_modality = modality_name
@@ -198,6 +201,13 @@ class HeterPyramidSinglePactCbea(HeterPyramidSingle):
             output_dict["pact_cbea"]["evidence_descriptor"] = head_output["evidence_descriptor"]
         if "evidence_feature" in head_output:
             output_dict["pact_cbea"]["evidence_feature"] = head_output["evidence_feature"]
+        if "evidence_localization_uncertainty" in head_output:
+            output_dict["pact_cbea"]["evidence_localization_uncertainty_logits"] = (
+                head_output["evidence_localization_uncertainty_logits"]
+            )
+            output_dict["pact_cbea"]["evidence_localization_uncertainty"] = head_output[
+                "evidence_localization_uncertainty"
+            ]
         return output_dict
 
     def _is_local_evidence_enabled(self):
@@ -247,6 +257,10 @@ class HeterPyramidSinglePactCbea(HeterPyramidSingle):
         head["normalize_descriptor"] = bool(head.get("normalize_descriptor", True))
         head["return_feature"] = bool(head.get("return_feature", True))
         head["return_descriptor"] = bool(head.get("return_descriptor", False))
+        loc_unc_head = head["localization_uncertainty"]
+        loc_unc_head["enabled"] = bool(
+            loc_unc_head.get("enabled", False) or loc_unc_head.get("enable", False)
+        )
 
         loss = normalized["evidence_loss"]
         loss["enabled"] = bool(loss.get("enabled", False) or loss.get("enable", False))
@@ -261,6 +275,16 @@ class HeterPyramidSinglePactCbea(HeterPyramidSingle):
         desc = loss["descriptor"]
         desc["enabled"] = bool(desc.get("enabled", False) or desc.get("enable", False))
         desc["weight"] = float(desc.get("weight", 0.001))
+        loc_unc = loss["localization_uncertainty"]
+        loc_unc["enabled"] = bool(
+            loc_unc.get("enabled", False) or loc_unc.get("enable", False)
+        )
+        loc_unc["weight"] = float(loc_unc.get("weight", 0.001))
+        loc_unc["max_residual"] = float(loc_unc.get("max_residual", 10.0))
+        if loc_unc["max_residual"] <= 0.0:
+            raise ValueError(
+                "evidence_loss.localization_uncertainty.max_residual must be positive"
+            )
         return normalized
 
     @staticmethod
@@ -284,6 +308,9 @@ class HeterPyramidSinglePactCbea(HeterPyramidSingle):
                 "normalize_descriptor": True,
                 "return_feature": True,
                 "return_descriptor": False,
+                "localization_uncertainty": {
+                    "enabled": False,
+                },
             },
             "evidence_loss": {
                 "enabled": False,
@@ -300,6 +327,11 @@ class HeterPyramidSinglePactCbea(HeterPyramidSingle):
                 "descriptor": {
                     "enabled": False,
                     "weight": 0.001,
+                },
+                "localization_uncertainty": {
+                    "enabled": False,
+                    "weight": 0.001,
+                    "max_residual": 10.0,
                 },
             },
         }
