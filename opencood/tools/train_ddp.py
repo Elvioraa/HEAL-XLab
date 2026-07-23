@@ -129,6 +129,14 @@ def main():
     supervise_single_flag = False if not hasattr(opencood_train_dataset, "supervise_single") else opencood_train_dataset.supervise_single
     # used to help schedule learning rate
 
+    # Optional gradient accumulation. OFF by default (accumulate_grad_batches=1),
+    # which steps every batch exactly like before. AMP stays controlled by the
+    # existing --half flag and is left unchanged. With accumulation the loss is
+    # averaged over the window and optimizer.step() runs every N micro-batches.
+    accum_steps = max(1, int(hypes['train_params'].get('accumulate_grad_batches', 1)))
+    if opt.rank == 0 and accum_steps > 1:
+        print('accumulate_grad_batches: %d' % accum_steps)
+
     for epoch in range(init_epoch, max(epoches, init_epoch)):
         for param_group in optimizer.param_groups:
             print('learning rate %f' % param_group["lr"])
@@ -140,11 +148,13 @@ def main():
             model_without_ddp.model_train_init()
         except:
             print("No model_train_init function")
+        # Zero once before the accumulation window; grads are cleared again
+        # right after each optimizer.step() below.
+        model.zero_grad()
+        optimizer.zero_grad()
         for i, batch_data in enumerate(train_loader):
             if batch_data is None or batch_data['ego']['object_bbx_mask'].sum()==0:
                 continue
-            model.zero_grad()
-            optimizer.zero_grad()
             batch_data = train_utils.to_device(batch_data, device)
             batch_data['ego']['epoch'] = epoch
             if not opt.half:
@@ -160,19 +170,26 @@ def main():
 
             if supervise_single_flag:
                 if not opt.half:
-                    final_loss += criterion(ouput_dict, batch_data['ego']['label_dict_single'], suffix="_single") * hypes['train_params'].get("single_weight", 1)
+                    final_loss = final_loss + criterion(ouput_dict, batch_data['ego']['label_dict_single'], suffix="_single") * hypes['train_params'].get("single_weight", 1)
                 else:
                     with torch.cuda.amp.autocast():
-                        final_loss += criterion(ouput_dict, batch_data['ego']['label_dict_single'], suffix="_single") * hypes['train_params'].get("single_weight", 1)
+                        final_loss = final_loss + criterion(ouput_dict, batch_data['ego']['label_dict_single'], suffix="_single") * hypes['train_params'].get("single_weight", 1)
                 criterion.logging(epoch, i, len(train_loader), writer, suffix="_single")
 
+            step_now = (i + 1) % accum_steps == 0
             if not opt.half:
-                final_loss.backward()
-                optimizer.step()
+                (final_loss / accum_steps).backward()
+                if step_now:
+                    optimizer.step()
+                    model.zero_grad()
+                    optimizer.zero_grad()
             else:
-                scaler.scale(final_loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
+                scaler.scale(final_loss / accum_steps).backward()
+                if step_now:
+                    scaler.step(optimizer)
+                    scaler.update()
+                    model.zero_grad()
+                    optimizer.zero_grad()
 
 
         # torch.cuda.empty_cache() # it will destroy memory buffer
