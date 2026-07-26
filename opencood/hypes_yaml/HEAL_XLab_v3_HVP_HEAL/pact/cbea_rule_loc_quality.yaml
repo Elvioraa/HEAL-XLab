@@ -4,19 +4,27 @@ validate_dir: "dataset/OPV2V/validate"
 test_dir: "dataset/OPV2V/test"
 
 # Collaborative inference config for the localization-quality experiment.
-# Identical to pact/cbea_rule.yaml except the two localization switches:
-#   - model.args.pact_cbea.evidence_head.localization_uncertainty.enabled: true
-#   - model.args.pact_cbea.aggregation.localization_weight: true
+#
+# Fusion mode is heal_multiscale_prior with lambda=1.0: the CBEA reliability
+# alpha is injected as a PRIOR into HEAL's pyramid multiscale fusion, matching
+# the lambda=1 baseline. Do NOT fall back to fusion_mode: legacy_rule here -
+# that replaces HEAL's multiscale fusion with the parameter-free rule and is
+# known to collapse AP@0.7 (see the evidence-routed ablation).
+#
+# Relative to pact/cbea_rule.yaml this config differs in:
+#   - fusion_mode / multiscale_prior (prior injection instead of legacy rule)
+#   - evidence_head.localization_uncertainty.enabled: true
+#   - aggregation.localization_weight: true
 # It expects a composed m1..m4 checkpoint whose four evidence heads were each
 # trained with the localization head (Stage1 m1 loc-quality + Stage2 m2/m3/m4
-# loc-quality). With localization_weight disabled the rule falls back to the
-# original CBEA reliability, so an ablation is just flipping that one flag.
+# loc-quality). Flipping aggregation.localization_weight to false is the
+# ablation: the rule then falls back to the original CBEA reliability while
+# everything else, including the multiscale prior, stays identical.
 #
-# To combine with the HEAL multiscale prior (lambda / exclude_threshold /
-# exclude_floor_mix sweeps), add under model.args.pact_cbea:
-#   fusion_mode: heal_multiscale_prior
-#   multiscale_prior: { enabled: true, lambda: 1.0, exclude_threshold: 0.1, ... }
-# The localization signal feeds the same alpha used by the multiscale prior.
+# For the tau / mu sweeps add under multiscale_prior:
+#   exclude_threshold: 0.1
+#   exclude_floor_mix: 0.5
+# The localization signal feeds the same alpha those knobs operate on.
 
 yaml_parser: "load_general_params"
 train_params:
@@ -158,6 +166,12 @@ model:
       use_stage3_joint_training: false
       heal_compatible: true
       plug_and_play: true
+      # Inject the CBEA alpha as a prior into HEAL's pyramid fusion instead of
+      # replacing it (legacy_rule). lambda=1.0 matches the lambda=1 baseline.
+      fusion_mode: heal_multiscale_prior
+      multiscale_prior:
+        enabled: true
+        lambda: 1.0
       local_evidence:
         enabled: true
       evidence_head:
