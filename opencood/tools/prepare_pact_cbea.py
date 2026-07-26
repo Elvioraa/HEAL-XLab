@@ -73,16 +73,32 @@ def main():
         "pact_rule_parameter_count": 0,
         "pact_rule_checkpoint_keys": [],
     }
+    # Official merge_dict(single, stage1) filters its FIRST argument, dropping
+    # any key containing 'head_m'. That is meant for modality-specific
+    # detection heads (cls_head_m4, ...) but also matches our
+    # 'pact_cbea_evidence_head_mX.*' keys. Since the accumulator is passed as
+    # that first argument on every iteration, each round silently discards the
+    # evidence head accumulated in the previous round, leaving only the last
+    # merged modality (m1). Back the evidence heads up here and restore them
+    # once after the loop, so no round can filter them away.
+    evidence_backup = OrderedDict()
     for modality in ("m2", "m3", "m4", "m1"):
         path = checkpoint_paths[modality]
         state_dict = _load_state_dict(path)
         merged = merge_dict(merged, state_dict)
+        prefix = "pact_cbea_evidence_head_%s" % modality
+        for key, value in state_dict.items():
+            if key.startswith(prefix):
+                evidence_backup[key] = value
         manifest["source_checkpoints"][modality] = {
             "path": path,
             "bytes": os.path.getsize(path),
             "sha256": _sha256(path),
             "required_prefix": "pact_cbea_evidence_head_%s" % modality,
         }
+
+    merged = _restore_evidence_heads(merged, evidence_backup)
+    _validate_merged_evidence_heads(merged, checkpoint_paths)
 
     os.makedirs(output_dir, exist_ok=True)
     torch.save(merged, output_path)
@@ -110,6 +126,63 @@ def parse_args():
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
+
+
+def _restore_evidence_heads(merged, evidence_backup):
+    """Put every modality's evidence-head keys back after merge_dict filtering.
+
+    Values come verbatim from each modality's own checkpoint, so this only
+    restores what the official 'head_m' filter removed and never overwrites
+    anything the merge legitimately produced.
+    """
+    for key, value in evidence_backup.items():
+        merged[key] = value
+    if evidence_backup:
+        print("Restored %d evidence-head keys" % len(evidence_backup))
+    return merged
+
+
+def _validate_merged_evidence_heads(merged, checkpoint_paths):
+    """Fail loudly if any modality's evidence head is missing after merging.
+
+    Without this guard a checkpoint whose evidence heads were silently dropped
+    still loads fine, but the CBEA rule then routes on randomly initialized
+    evidence, producing meaningless alpha.
+    """
+    missing = []
+    for modality in checkpoint_paths:
+        prefix = "pact_cbea_evidence_head_%s" % modality
+        source_keys = {
+            key for key in _load_state_dict(checkpoint_paths[modality])
+            if key.startswith(prefix)
+        }
+        merged_keys = {key for key in merged if key.startswith(prefix)}
+        if not merged_keys:
+            missing.append("%s: 0 keys in merged checkpoint" % modality)
+        elif source_keys - merged_keys:
+            missing.append(
+                "%s: %d key(s) lost, e.g. %s"
+                % (
+                    modality,
+                    len(source_keys - merged_keys),
+                    sorted(source_keys - merged_keys)[0],
+                )
+            )
+    if missing:
+        raise RuntimeError(
+            "merged checkpoint is missing evidence-head parameters:\n  %s"
+            % "\n  ".join(missing)
+        )
+    for modality in sorted(checkpoint_paths):
+        prefix = "pact_cbea_evidence_head_%s" % modality
+        count = sum(1 for key in merged if key.startswith(prefix))
+        loc = sum(
+            1 for key in merged
+            if key.startswith(prefix) and "localization" in key
+        )
+        print(
+            "  %s evidence head: %d keys (%d localization)" % (modality, count, loc)
+        )
 
 
 def _print_checkpoint_checks(modality, path):
