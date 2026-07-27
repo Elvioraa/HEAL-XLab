@@ -67,6 +67,9 @@ def parse_args():
                         help="number of frames to accumulate statistics over")
     parser.add_argument("--range", type=str, default="204.8,102.4",
                         help="evaluation range, matching inference_heter_in_order")
+    parser.add_argument("--use_cav", type=int, default=4,
+                        help="how many agents participate; 4 (m1..m4) is the "
+                             "case where cross-modality discrimination matters")
     return parser.parse_args()
 
 
@@ -139,7 +142,12 @@ def main():
     model.to(device)
     model.eval()
 
-    print("Dataset Building")
+    # Both fields are set by inference_heter_in_order inside its use_cav loop;
+    # the infer dataset requires them.
+    hypes["use_cav"] = opt.use_cav
+    hypes["heter"]["lidar_channels_dict"] = {"m3": 32}
+
+    print("Dataset Building (use_cav=%d)" % opt.use_cav)
     dataset = build_dataset(hypes, visualize=False, train=False)
     loader = DataLoader(dataset, batch_size=1, num_workers=4,
                         collate_fn=dataset.collate_batch_test,
