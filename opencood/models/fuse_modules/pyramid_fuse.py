@@ -26,7 +26,7 @@ def _softmax_nan_to_zero(scores):
 
 def weighted_fuse(x, score, record_len, affine_matrix, align_corners,
                   cbea_alpha=None, cbea_lambda=0.0, cbea_exclude_threshold=0.0,
-                  cbea_exclude_floor_mix=0.0):
+                  cbea_exclude_floor_mix=0.0, cbea_injection_strength=0.0):
     """
     Parameters
     ----------
@@ -61,6 +61,18 @@ def weighted_fuse(x, score, record_len, affine_matrix, align_corners,
         reproduces the hard-exclusion result bit-for-bit; mu=1.0
         reproduces the tau=0.0 gate-only result bit-for-bit. Only has an
         effect when cbea_exclude_threshold > 0.0.
+
+    cbea_injection_strength : float
+        Aggressive injection exponent k >= 0.0, default 0.0 (off). The
+        multiplicative lambda gate barely moves the fused output because
+        alpha only nudges HEAL's own scores before softmax. This adds a
+        logit-space term k * log(N * alpha_i), making the final softmax
+        weight proportional to exp(score_i * gate_i) * (N * alpha_i)^k, so
+        alpha gains direct, tunable control over the fusion. k=0.0 does not
+        add the term (bit-exact identical to the pre-existing gate). Uniform
+        alpha (N * alpha = 1) gives log(1) = 0, so it stays identity for any
+        k. Only active when the CBEA prior is in use (cbea_alpha given and
+        cbea_lambda != 0).
     """
 
     if not isinstance(cbea_exclude_threshold, (int, float)):
@@ -71,6 +83,10 @@ def weighted_fuse(x, score, record_len, affine_matrix, align_corners,
         raise ValueError("cbea_exclude_floor_mix must be a number")
     if not 0.0 <= float(cbea_exclude_floor_mix) <= 1.0:
         raise ValueError("cbea_exclude_floor_mix must be in [0.0, 1.0]")
+    if not isinstance(cbea_injection_strength, (int, float)):
+        raise ValueError("cbea_injection_strength must be a number")
+    if float(cbea_injection_strength) < 0.0:
+        raise ValueError("cbea_injection_strength must be >= 0.0")
 
     _, C, H, W = x.shape
     B, L = affine_matrix.shape[:2]
@@ -125,6 +141,17 @@ def weighted_fuse(x, score, record_len, affine_matrix, align_corners,
             if not torch.isfinite(gate).all().item():
                 raise ValueError("CBEA multiscale prior gate contains NaN or Inf")
             gated_scores = scores_in_ego * gate
+            if float(cbea_injection_strength) > 0.0:
+                # Logit-space boost: adds k * log(N * alpha), so the softmax
+                # weight picks up a (N * alpha)^k factor and alpha gains direct
+                # control. clamp keeps log finite where alpha -> 0 (those
+                # pixels are masked to -inf below anyway).
+                boost = float(cbea_injection_strength) * torch.log(
+                    torch.clamp(relative_prior, min=1e-6)
+                )
+                gated_scores = gated_scores + boost
+                if not torch.isfinite(gated_scores.masked_fill(~valid_mask, 0.0)).all().item():
+                    raise ValueError("CBEA injection boost produced NaN or Inf")
             gated_scores = gated_scores.masked_fill(~valid_mask, -float('inf'))
 
             if float(cbea_exclude_threshold) > 0.0:
@@ -197,7 +224,7 @@ class PyramidFusion(ResNetBEVBackbone):
     def forward_collab(self, spatial_features, record_len, affine_matrix,
                        agent_modality_list=None, cam_crop_info=None,
                        cbea_alpha=None, cbea_lambda=0.0, cbea_exclude_threshold=0.0,
-                       cbea_exclude_floor_mix=0.0):
+                       cbea_exclude_floor_mix=0.0, cbea_injection_strength=0.0):
         """
         spatial_features : torch.tensor
             [sum(record_len), C, H, W]
@@ -267,6 +294,7 @@ class PyramidFusion(ResNetBEVBackbone):
                 cbea_lambda=cbea_lambda,
                 cbea_exclude_threshold=cbea_exclude_threshold,
                 cbea_exclude_floor_mix=cbea_exclude_floor_mix,
+                cbea_injection_strength=cbea_injection_strength,
             ))
         fused_feature = self.decode_multiscale_feature(fused_feature_list)
 

@@ -371,6 +371,90 @@ def test_exclude_floor_mix_rejects_out_of_range():
     print("exclude_floor_mix out-of-range rejected: True")
 
 
+def test_injection_strength_default_disabled_identity():
+    torch.manual_seed(23)
+    record_len = torch.tensor([3], dtype=torch.long)
+    feature = torch.randn(3, 3, 4, 5)
+    score = torch.sigmoid(torch.randn(3, 1, 4, 5)) + 1e-4
+    affine = identity_affine(1, 3)
+    alpha = torch.softmax(torch.randn(3, 1, 2, 3), dim=0)
+    baseline = weighted_fuse(
+        feature, score, record_len, affine, False,
+        cbea_alpha=alpha, cbea_lambda=1.0,
+    )
+    with_zero = weighted_fuse(
+        feature, score, record_len, affine, False,
+        cbea_alpha=alpha, cbea_lambda=1.0, cbea_injection_strength=0.0,
+    )
+    assert torch.equal(baseline, with_zero)
+    print("injection_strength=0.0 (default) torch.equal to gate-only: True")
+
+
+def test_injection_strength_uniform_alpha_identity():
+    torch.manual_seed(29)
+    record_len = torch.tensor([3], dtype=torch.long)
+    feature = torch.randn(3, 3, 4, 5)
+    score = torch.sigmoid(torch.randn(3, 1, 4, 5)) + 1e-4
+    affine = identity_affine(1, 3)
+    alpha = torch.full((3, 1, 2, 3), 1.0 / 3.0)
+    baseline = weighted_fuse(feature, score, record_len, affine, False)
+    for strength in (2.0, 8.0):
+        output = weighted_fuse(
+            feature, score, record_len, affine, False,
+            cbea_alpha=alpha, cbea_lambda=1.0, cbea_injection_strength=strength,
+        )
+        assert_finite(output, "uniform alpha injection output")
+        assert max_abs_diff(baseline, output) < 1e-6
+    print("injection_strength uniform-alpha stays identity for any k: True")
+
+
+def test_injection_strength_amplifies_alpha():
+    record_len = torch.tensor([2], dtype=torch.long)
+    feature = torch.stack((
+        torch.full((1, 3, 3), 10.0),
+        torch.zeros(1, 3, 3),
+    ))
+    score = torch.ones(2, 1, 3, 3)
+    affine = identity_affine(1, 2)
+    # agent 0 more reliable than agent 1
+    alpha = torch.tensor([0.7, 0.3]).view(2, 1, 1, 1).expand(2, 1, 3, 3)
+    gate_only = weighted_fuse(
+        feature, score, record_len, affine, False,
+        cbea_alpha=alpha, cbea_lambda=1.0,
+    )
+    boosted = weighted_fuse(
+        feature, score, record_len, affine, False,
+        cbea_alpha=alpha, cbea_lambda=1.0, cbea_injection_strength=8.0,
+    )
+    assert_finite(boosted, "boosted output")
+    # feature value 10 belongs to the more-reliable agent 0, so amplifying its
+    # weight must push the fused mean up relative to the mild gate.
+    assert float(boosted.mean().item()) > float(gate_only.mean().item()) + 1e-3
+    print(
+        "injection_strength amplifies reliable agent: True; gate_mean=%.4f "
+        "boosted_mean=%.4f" % (gate_only.mean().item(), boosted.mean().item())
+    )
+
+
+def test_injection_strength_rejects_negative():
+    record_len = torch.tensor([2], dtype=torch.long)
+    feature = torch.randn(2, 2, 3, 3)
+    score = torch.sigmoid(torch.randn(2, 1, 3, 3)) + 1e-4
+    affine = identity_affine(1, 2)
+    alpha = torch.full((2, 1, 1, 1), 0.5)
+    try:
+        weighted_fuse(
+            feature, score, record_len, affine, False,
+            cbea_alpha=alpha, cbea_lambda=1.0, cbea_injection_strength=-1.0,
+        )
+    except ValueError:
+        rejected = True
+    else:
+        rejected = False
+    assert rejected
+    print("negative injection_strength rejected: True")
+
+
 def test_alpha_flattening():
     direct = torch.rand(1, 2, 1, 4, 5)
     flattened_direct = HeterPyramidCollabPactCbea._flatten_pact_alpha(
@@ -415,6 +499,7 @@ def test_config_normalization():
         "lambda": 0.0,
         "exclude_threshold": 0.0,
         "exclude_floor_mix": 0.0,
+        "injection_strength": 0.0,
     }
     configured = HeterPyramidCollabPactCbea._normalize_pact_cfg({
         "fusion_mode": "heal_multiscale_prior",
@@ -435,6 +520,7 @@ def test_config_normalization():
         {"multiscale_prior": {"exclude_threshold": 1.0}},
         {"multiscale_prior": {"exclude_floor_mix": -0.1}},
         {"multiscale_prior": {"exclude_floor_mix": 1.1}},
+        {"multiscale_prior": {"injection_strength": -0.1}},
     ):
         try:
             HeterPyramidCollabPactCbea._normalize_pact_cfg(invalid)
@@ -582,6 +668,10 @@ def main():
     test_exclude_floor_mix_monotonic_blend()
     test_exclude_floor_mix_inert_when_threshold_zero()
     test_exclude_floor_mix_rejects_out_of_range()
+    test_injection_strength_default_disabled_identity()
+    test_injection_strength_uniform_alpha_identity()
+    test_injection_strength_amplifies_alpha()
+    test_injection_strength_rejects_negative()
     test_alpha_flattening()
     test_config_normalization()
     test_model_branch_selection()

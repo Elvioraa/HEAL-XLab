@@ -353,6 +353,9 @@ class HeterPyramidCollabPactCbea(HeterPyramidCollab):
         cbea_exclude_floor_mix = float(
             self.pact_multiscale_prior_cfg.get("exclude_floor_mix", 0.0)
         )
+        cbea_injection_strength = float(
+            self.pact_multiscale_prior_cfg.get("injection_strength", 0.0)
+        )
         if multiscale_used:
             fused_feature, occ_outputs = self.pyramid_backbone.forward_collab(
                 heter_feature_2d,
@@ -364,6 +367,7 @@ class HeterPyramidCollabPactCbea(HeterPyramidCollab):
                 cbea_lambda=cbea_lambda,
                 cbea_exclude_threshold=cbea_exclude_threshold,
                 cbea_exclude_floor_mix=cbea_exclude_floor_mix,
+                cbea_injection_strength=cbea_injection_strength,
             )
         else:
             fused_feature, occ_outputs = self.pyramid_backbone.forward_collab(
@@ -390,6 +394,7 @@ class HeterPyramidCollabPactCbea(HeterPyramidCollab):
             "pact_multiscale_lambda": float(cbea_lambda),
             "pact_multiscale_exclude_threshold": cbea_exclude_threshold,
             "pact_multiscale_exclude_floor_mix": cbea_exclude_floor_mix,
+            "pact_multiscale_injection_strength": cbea_injection_strength,
             "pact_multiscale_fallbacks": fallbacks,
             "pact_multiscale_alpha_shape": (
                 list(cbea_alpha.shape) if cbea_alpha is not None else None
@@ -589,6 +594,7 @@ class HeterPyramidCollabPactCbea(HeterPyramidCollab):
                 "lambda": 0.0,
                 "exclude_threshold": 0.0,
                 "exclude_floor_mix": 0.0,
+                "injection_strength": 0.0,
             },
             "local_evidence": {
                 "enabled": False,
@@ -672,6 +678,18 @@ class HeterPyramidCollabPactCbea(HeterPyramidCollab):
         if not 0.0 <= multiscale_prior["exclude_floor_mix"] <= 1.0:
             raise ValueError(
                 "pact_cbea.multiscale_prior.exclude_floor_mix must be in [0.0, 1.0]"
+            )
+        try:
+            multiscale_prior["injection_strength"] = float(
+                multiscale_prior.get("injection_strength", 0.0)
+            )
+        except (TypeError, ValueError):
+            raise ValueError(
+                "pact_cbea.multiscale_prior.injection_strength must be a float"
+            )
+        if multiscale_prior["injection_strength"] < 0.0:
+            raise ValueError(
+                "pact_cbea.multiscale_prior.injection_strength must be >= 0.0"
             )
         if normalized["trainable"]:
             raise ValueError("PACT-CBEA v1 is parameter-free; pact_cbea.trainable must be false")
