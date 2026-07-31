@@ -163,3 +163,5 @@ opencood/tools/save_params.py
 ./vscode
 .vscode
 opencood/tools/inference_w_noise_heter.py
+# Local Claude Code workspace
+/.claude/

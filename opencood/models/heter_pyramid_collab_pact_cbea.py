@@ -188,12 +188,19 @@ class HeterPyramidCollabPactCbea(HeterPyramidCollab):
             pact_fusion_mode == "heal_multiscale_prior"
             and pact_multiscale_prior_cfg["enabled"]
         ):
-            return self._forward_heal_multiscale_prior(
+            result = self._forward_heal_multiscale_prior(
                 output_dict,
                 heter_feature_2d,
                 single_feature,
                 record_len,
                 affine_matrix,
+                data_dict.get("pairwise_t_matrix"),
+                agent_modality_list,
+            )
+            return self._maybe_attach_object_stage3_context(
+                result,
+                single_feature,
+                record_len,
                 data_dict.get("pairwise_t_matrix"),
                 agent_modality_list,
             )
@@ -285,6 +292,35 @@ class HeterPyramidCollabPactCbea(HeterPyramidCollab):
                 'occ_single_list': occ_outputs,
                 'pact_cbea': pact_debug,
         })
+        return self._maybe_attach_object_stage3_context(
+            output_dict,
+            single_feature,
+            record_len,
+            data_dict.get("pairwise_t_matrix"),
+            agent_modality_list,
+        )
+
+    def _object_stage3_context_requested(self):
+        """Return whether a derived model needs frozen per-agent context.
+
+        The production PACT-CBEA class keeps this false, so its output keys and
+        state dict are unchanged. Object-level Stage 3 overrides this hook.
+        """
+        return False
+
+    def _maybe_attach_object_stage3_context(
+            self, output_dict, single_feature, record_len,
+            pairwise_t_matrix, agent_modality_list):
+        if not self._object_stage3_context_requested():
+            return output_dict
+        output_dict["_pact_cbea_object_context"] = {
+            "single_feature": single_feature,
+            "record_len": record_len,
+            "pairwise_t_matrix": pairwise_t_matrix,
+            "agent_modality_list": tuple(agent_modality_list),
+            "single_feature_frame": "per_agent_local",
+            "pairwise_direction": "source_i_to_target_j",
+        }
         return output_dict
 
     def _forward_heal_multiscale_prior(
