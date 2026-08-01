@@ -1,4 +1,4 @@
-name: HEAL_ZERO_START_2080TI_m2_stage2
+name: PACT_CBEA_OBJECT_STAGE3_v1/stage2/m2_alignto_m1
 root_dir: "dataset/OPV2V/train"
 validate_dir: "dataset/OPV2V/validate"
 test_dir: "dataset/OPV2V/test"

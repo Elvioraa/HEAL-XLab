@@ -25,20 +25,28 @@ from opencood.models.sub_modules.pact_cbea_object_stage3_utils import (
 from opencood.tools import train_utils
 
 
-def parse_args():
+def parse_args(argv=None):
+    """Parse inference arguments, optionally from a supplied test argv."""
     parser = argparse.ArgumentParser(
         description="Evaluate PACT-CBEA object-level Stage 3"
     )
     parser.add_argument("--hypes_yaml", "-y", required=True)
     parser.add_argument("--base-checkpoint", default=None)
     parser.add_argument("--stage3-checkpoint", default=None)
-    parser.add_argument("--output-dir", required=True)
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help=(
+            "evaluation output directory; defaults to the Stage 3 checkpoint "
+            "directory, or the base checkpoint directory when Stage 3 is off"
+        ),
+    )
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--dataset-split", choices=("validate", "test"), default="test")
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--max-batches", type=int, default=None)
     parser.add_argument("--disable-stage3", action="store_true")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def main():
@@ -56,6 +64,9 @@ def main():
         raise ValueError("a base checkpoint must be supplied")
     if not args.disable_stage3 and not stage3_checkpoint:
         raise ValueError("enabled Stage 3 inference requires a checkpoint")
+    output_dir = _resolve_output_dir(
+        args.output_dir, stage3_checkpoint, base_checkpoint
+    )
 
     if args.dataset_split == "test":
         hypes["validate_dir"] = hypes["test_dir"]
@@ -120,15 +131,15 @@ def main():
             refined_boxes, refined_scores, gt_boxes, refined_stat, eval_utils
         )
 
-    os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
     print("Baseline collaborative detector:")
     baseline_ap = eval_utils.eval_final_results(
-        baseline_stat, args.output_dir, "object_stage3_baseline"
+        baseline_stat, output_dir, "object_stage3_baseline"
     )
     print("Object Stage 3 %s:" % ("OFF" if args.disable_stage3 else "ON"))
     refined_ap = eval_utils.eval_final_results(
         refined_stat,
-        args.output_dir,
+        output_dir,
         "object_stage3_off" if args.disable_stage3 else "object_stage3_on",
     )
     diagnostics.print_summary()
@@ -229,6 +240,15 @@ def _resolve_device(requested):
     if requested.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but is unavailable")
     return torch.device(requested)
+
+
+def _resolve_output_dir(requested, stage3_checkpoint, base_checkpoint):
+    """Resolve explicit output or preserve checkpoint-directory fallback."""
+    if requested:
+        return requested
+    checkpoint = stage3_checkpoint or base_checkpoint
+    directory = os.path.dirname(os.path.abspath(checkpoint))
+    return directory or "."
 
 
 if __name__ == "__main__":

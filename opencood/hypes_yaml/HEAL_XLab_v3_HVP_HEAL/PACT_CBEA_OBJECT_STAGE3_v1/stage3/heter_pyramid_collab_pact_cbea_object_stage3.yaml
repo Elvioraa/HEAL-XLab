@@ -1,4 +1,4 @@
-name: HEAL_ZERO_START_2080TI_object_stage3
+name: PACT_CBEA_OBJECT_STAGE3_v1/stage3/object_refiner
 root_dir: "dataset/OPV2V/train"
 validate_dir: "dataset/OPV2V/validate"
 test_dir: "dataset/OPV2V/test"
@@ -226,7 +226,7 @@ model:
           feature_stride_x: 2.0
           feature_stride_y: 2.0
 
-        base_checkpoint: "opencood/logs/HEAL_ZERO_START_2080TI/final_infer/net_epoch1.pth"
+        base_checkpoint: "opencood/logs/PACT_CBEA_OBJECT_STAGE3_v1/stage2/merged_m1m2m3m4/net_epoch1.pth"
         stage3_checkpoint: null
     m1:
       core_method: *core_method_m1
