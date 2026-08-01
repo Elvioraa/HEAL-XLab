@@ -55,6 +55,13 @@ def main():
     object_cfg = _object_cfg(hypes)
     if not object_cfg.get("enabled", False):
         raise RuntimeError("object_level_stage3.enabled must be true for training")
+    accumulation_steps = int(
+        hypes["train_params"].get("accumulate_grad_batches", 1)
+    )
+    if accumulation_steps != 1:
+        raise ValueError(
+            "object Stage 3 currently requires accumulate_grad_batches=1"
+        )
 
     base_checkpoint = args.base_checkpoint or object_cfg.get("base_checkpoint")
     resume_checkpoint = args.resume_stage3 or object_cfg.get("stage3_checkpoint")
@@ -142,6 +149,20 @@ def main():
     scaler = torch.cuda.amp.GradScaler(
         enabled=amp_enabled and device.type == "cuda"
     )
+    if rank == 0:
+        print(
+            "Stage 3 batch plan | micro batch: %d | accumulation steps: %d | "
+            "world size: %d | effective global batch: %d | AMP enabled: %s | "
+            "optimizer updates per epoch (before invalid skips): %d"
+            % (
+                batch_size,
+                accumulation_steps,
+                world_size,
+                batch_size * accumulation_steps * world_size,
+                scaler.is_enabled(),
+                len(train_loader),
+            )
+        )
     epochs = int(hypes["train_params"]["epoches"])
     save_freq = int(hypes["train_params"].get("save_freq", 1))
     eval_freq = int(hypes["train_params"].get("eval_freq", 1))

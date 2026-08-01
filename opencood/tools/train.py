@@ -8,16 +8,18 @@ import statistics
 
 import torch
 from torch.utils.data import DataLoader, Subset
-from tensorboardX import SummaryWriter
+from opencood.tools.gradient_accumulation import (
+    GradientAccumulator,
+    calculate_effective_global_batch,
+    finish_accumulation_epoch,
+    get_runtime_world_size,
+    resolve_accumulation_steps,
+    resolve_amp_setting,
+)
 
-import opencood.hypes_yaml.yaml_utils as yaml_utils
-from opencood.tools import train_utils
-from opencood.data_utils.datasets import build_dataset
 
-from icecream import ic
-
-
-def train_parser():
+def train_parser(argv=None):
+    """Parse training CLI arguments, optionally from a supplied test argv."""
     parser = argparse.ArgumentParser(description="synthetic data generation")
     parser.add_argument("--hypes_yaml", "-y", type=str, required=True,
                         help='data generation yaml file needed ')
@@ -25,13 +27,40 @@ def train_parser():
                         help='Continued training path')
     parser.add_argument('--fusion_method', '-f', default="intermediate",
                         help='passed to inference.')
-    opt = parser.parse_args()
+    parser.add_argument('--accumulation-steps', type=int, default=None,
+                        help='override train_params.accumulate_grad_batches')
+    amp_group = parser.add_mutually_exclusive_group()
+    amp_group.add_argument('--amp', dest='amp_override', action='store_true',
+                           help='enable AMP for this run')
+    amp_group.add_argument('--no-amp', dest='amp_override', action='store_false',
+                           help='disable AMP for this run')
+    parser.set_defaults(amp_override=None)
+    opt = parser.parse_args(argv)
     return opt
 
 
 def main():
+    from tensorboardX import SummaryWriter
+
+    import opencood.hypes_yaml.yaml_utils as yaml_utils
+    from opencood.data_utils.datasets import build_dataset
+    from opencood.tools import train_utils
+
     opt = train_parser()
     hypes = yaml_utils.load_yaml(opt.hypes_yaml, opt)
+    train_params = hypes.get('train_params')
+    if not isinstance(train_params, dict):
+        raise TypeError('train_params must be a mapping')
+    accum_steps = resolve_accumulation_steps(
+        train_params.get('accumulate_grad_batches', 1),
+        opt.accumulation_steps,
+    )
+    amp_requested = resolve_amp_setting(
+        train_params.get('amp', False),
+        opt.amp_override,
+    )
+    train_params['accumulate_grad_batches'] = accum_steps
+    train_params['amp'] = amp_requested
 
     print('Dataset Building')
     opencood_train_dataset = build_dataset(hypes, visualize=False, train=True)
@@ -99,16 +128,31 @@ def main():
     supervise_single_flag = False if not hasattr(opencood_train_dataset, "supervise_single") else opencood_train_dataset.supervise_single
     # used to help schedule learning rate
 
-    # Optional mixed precision + gradient accumulation. Both are OFF by default
-    # (amp=False, accumulate_grad_batches=1) which reproduces the original
-    # per-batch fp32 update bit-for-bit: GradScaler(enabled=False) and
-    # autocast(enabled=False) are pure pass-throughs, and dividing by 1 and
-    # stepping every batch matches the previous behavior exactly.
-    amp_enabled = bool(hypes['train_params'].get('amp', False))
-    accum_steps = max(1, int(hypes['train_params'].get('accumulate_grad_batches', 1)))
-    scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
-    if amp_enabled or accum_steps > 1:
-        print('AMP: %s | accumulate_grad_batches: %d' % (amp_enabled, accum_steps))
+    amp_enabled = amp_requested and torch.cuda.is_available()
+    if amp_requested and not amp_enabled:
+        print('AMP requested but CUDA is unavailable; AMP disabled')
+    accumulator = GradientAccumulator(accum_steps)
+    scaler = torch.cuda.amp.GradScaler(
+        enabled=amp_enabled
+    )
+    world_size = get_runtime_world_size()
+    effective_batch = calculate_effective_global_batch(
+        hypes['train_params']['batch_size'], accum_steps, world_size
+    )
+    planned_updates = len(train_loader) // accum_steps
+    print(
+        'Training batch plan | micro batch: %d | accumulation steps: %d | '
+        'world size: %d | effective global batch: %d | AMP enabled: %s | '
+        'optimizer updates per epoch (before invalid skips): %d'
+        % (
+            hypes['train_params']['batch_size'],
+            accum_steps,
+            world_size,
+            effective_batch,
+            scaler.is_enabled(),
+            planned_updates,
+        )
+    )
 
     for epoch in range(init_epoch, max(epoches, init_epoch)):
         for param_group in optimizer.param_groups:
@@ -119,10 +163,7 @@ def main():
             model.model_train_init()
         except:
             print("No model_train_init function")
-        # Zero once before the accumulation window; grads are cleared again
-        # right after each optimizer.step() below.
-        model.zero_grad()
-        optimizer.zero_grad()
+        accumulator.start_epoch(optimizer)
         for i, batch_data in enumerate(train_loader):
             if batch_data is None or batch_data['ego']['object_bbx_mask'].sum()==0:
                 continue
@@ -138,15 +179,24 @@ def main():
                     final_loss = final_loss + criterion(ouput_dict, batch_data['ego']['label_dict_single'], suffix="_single") * hypes['train_params'].get("single_weight", 1)
                 criterion.logging(epoch, i, len(train_loader), writer, suffix="_single")
 
-            # back-propagation (loss averaged over the accumulation window)
-            scaler.scale(final_loss / accum_steps).backward()
-            if (i + 1) % accum_steps == 0:
-                scaler.step(optimizer)
-                scaler.update()
-                model.zero_grad()
-                optimizer.zero_grad()
+            if accumulator.backward(final_loss, scaler):
+                accumulator.step(optimizer, scaler)
 
             # torch.cuda.empty_cache()  # it will destroy memory buffer
+
+        accumulation_summary = finish_accumulation_epoch(
+            accumulator, optimizer, len(train_loader)
+        )
+        print(
+            'Epoch %d accumulation | valid micro batches: %d | '
+            'optimizer updates: %d | dropped tail micro batches: %d'
+            % (
+                epoch,
+                accumulation_summary.valid_micro_batches,
+                accumulation_summary.optimizer_updates,
+                accumulation_summary.dropped_tail_micro_batches,
+            )
+        )
 
         if epoch % hypes['train_params']['save_freq'] == 0:
             torch.save(model.state_dict(),

@@ -1,0 +1,145 @@
+version: 1
+experiment_name: HEAL_ZERO_START_2080TI
+config_pack_root: opencood/hypes_yaml/HEAL_XLab_v3_HVP_HEAL/zero_start_2080ti_official_equivalent
+log_root: opencood/logs/HEAL_ZERO_START_2080TI
+
+hardware:
+  official_gpu_model: RTX 3090
+  official_gpu_count: 2
+  target_gpu_model: RTX 2080 Ti
+  target_gpu_count: 1
+  target_memory_gb: 11
+
+runtime_fields:
+  micro_batch: train_params.batch_size
+  accumulation_steps: train_params.accumulate_grad_batches
+  amp: train_params.amp
+
+configs:
+  m1:
+    source: opencood/hypes_yaml/opv2v/MoreModality/HEAL/stage1/m1_pyramid.yaml
+    source_sha256: 1aa99f53bd1cef211a0852c01f8e5a8534a87ef2ed786fe62dd28ca7c7dafd28
+    target: opencood/hypes_yaml/HEAL_XLab_v3_HVP_HEAL/zero_start_2080ti_official_equivalent/stage1/m1_pyramid.yaml
+    allowed_differences:
+      name: HEAL_ZERO_START_2080TI_m1_stage1
+      train_params.batch_size: 1
+      train_params.accumulate_grad_batches: 8
+      train_params.amp: false
+  m2:
+    source: opencood/hypes_yaml/opv2v/MoreModality/HEAL/stage2/m2_single_pyramid.yaml
+    source_sha256: 3a0851c90af8e2461230bbb2585cd5942d5146ce7a3541ad22a7221919af0874
+    target: opencood/hypes_yaml/HEAL_XLab_v3_HVP_HEAL/zero_start_2080ti_official_equivalent/stage2/m2_single_pyramid.yaml
+    allowed_differences:
+      name: HEAL_ZERO_START_2080TI_m2_stage2
+      train_params.batch_size: 1
+      train_params.accumulate_grad_batches: 8
+      train_params.amp: false
+  m3:
+    source: opencood/hypes_yaml/opv2v/MoreModality/HEAL/stage2/m3_single_pyramid.yaml
+    source_sha256: 3e5550aa84ebe1402fed760c055b8929c335fa83828487cb83dd21c1ae632c18
+    target: opencood/hypes_yaml/HEAL_XLab_v3_HVP_HEAL/zero_start_2080ti_official_equivalent/stage2/m3_single_pyramid.yaml
+    allowed_differences:
+      name: HEAL_ZERO_START_2080TI_m3_stage2
+      train_params.batch_size: 1
+      train_params.accumulate_grad_batches: 16
+      train_params.amp: false
+  m4:
+    source: opencood/hypes_yaml/opv2v/MoreModality/HEAL/stage2/m4_single_pyramid.yaml
+    source_sha256: d3b5f5399642a07dfdf198df7ea228feaca5d072d92f2cc06cd433a6716f5a36
+    target: opencood/hypes_yaml/HEAL_XLab_v3_HVP_HEAL/zero_start_2080ti_official_equivalent/stage2/m4_single_pyramid.yaml
+    allowed_differences:
+      name: HEAL_ZERO_START_2080TI_m4_stage2
+      train_params.batch_size: 1
+      train_params.accumulate_grad_batches: 8
+      train_params.amp: false
+  final_infer:
+    source: opencood/hypes_yaml/opv2v/MoreModality/HEAL/final_infer/m1m2m3m4.yaml
+    source_sha256: 573cc7dc5b9f3c36d16cd6a5b91bd522d39fb43c0fc7c18d8be26c33d6a07b6d
+    target: opencood/hypes_yaml/HEAL_XLab_v3_HVP_HEAL/zero_start_2080ti_official_equivalent/final_infer/m1m2m3m4.yaml
+    allowed_differences:
+      name: HEAL_ZERO_START_2080TI_final_infer
+      train_params.batch_size: 1
+  object_stage3:
+    source: opencood/hypes_yaml/HEAL_XLab_v3_HVP_HEAL/pact/object_stage3/heter_pyramid_collab_pact_cbea_object_stage3.yaml
+    source_sha256: f43822790babe7a66a4003a719f4ae746f43cf9f9c19a5e26ff088e832e5c6ba
+    target: opencood/hypes_yaml/HEAL_XLab_v3_HVP_HEAL/zero_start_2080ti_official_equivalent/object_stage3/heter_pyramid_collab_pact_cbea_object_stage3.yaml
+    allowed_differences:
+      name: HEAL_ZERO_START_2080TI_object_stage3
+      train_params.accumulate_grad_batches: 1
+      model.args.pact_cbea.object_level_stage3.base_checkpoint: opencood/logs/HEAL_ZERO_START_2080TI/final_infer/net_epoch1.pth
+
+batch_equivalence:
+  m1:
+    official_gpu_count: 2
+    official_per_gpu_batch: 4
+    official_global_batch: 8
+    target_gpu_count: 1
+    micro_batch: 1
+    accumulation_steps: 8
+    resulting_effective_batch: 8
+  m2:
+    official_gpu_count: 2
+    official_per_gpu_batch: 4
+    official_global_batch: 8
+    target_gpu_count: 1
+    micro_batch: 1
+    accumulation_steps: 8
+    resulting_effective_batch: 8
+  m3:
+    official_gpu_count: 2
+    official_per_gpu_batch: 8
+    official_global_batch: 16
+    target_gpu_count: 1
+    micro_batch: 1
+    accumulation_steps: 16
+    resulting_effective_batch: 16
+  m4:
+    official_gpu_count: 2
+    official_per_gpu_batch: 4
+    official_global_batch: 8
+    target_gpu_count: 1
+    micro_batch: 1
+    accumulation_steps: 8
+    resulting_effective_batch: 8
+  object_stage3:
+    official_gpu_count: null
+    official_per_gpu_batch: null
+    official_global_batch: null
+    target_gpu_count: 1
+    micro_batch: 1
+    accumulation_steps: 1
+    resulting_effective_batch: 1
+
+stage2_epoch_semantics:
+  yaml_epoches: 25
+  seed_checkpoint_basename: net_epoch1.pth
+  loaded_init_epoch: 1
+  python_epoch_range: range(1, 25)
+  first_executed_epoch_index: 1
+  last_executed_epoch_index: 24
+  actual_new_training_epochs: 24
+  scheduler_initial_steps: 1
+  official_readme_equivalent: true
+
+checkpoint_lineage:
+  m1:
+    input: none
+    output_dir: opencood/logs/HEAL_ZERO_START_2080TI/stage1/m1_base
+    selected_output: net_epoch_bestval_at*.pth
+  m2:
+    input: opencood/logs/HEAL_ZERO_START_2080TI/stage2/m2_alignto_m1/net_epoch1.pth
+    output_dir: opencood/logs/HEAL_ZERO_START_2080TI/stage2/m2_alignto_m1
+  m3:
+    input: opencood/logs/HEAL_ZERO_START_2080TI/stage2/m3_alignto_m1/net_epoch1.pth
+    output_dir: opencood/logs/HEAL_ZERO_START_2080TI/stage2/m3_alignto_m1
+  m4:
+    input: opencood/logs/HEAL_ZERO_START_2080TI/stage2/m4_alignto_m1/net_epoch1.pth
+    output_dir: opencood/logs/HEAL_ZERO_START_2080TI/stage2/m4_alignto_m1
+  merge_input_order:
+    - opencood/logs/HEAL_ZERO_START_2080TI/stage2/m2_alignto_m1
+    - opencood/logs/HEAL_ZERO_START_2080TI/stage2/m3_alignto_m1
+    - opencood/logs/HEAL_ZERO_START_2080TI/stage2/m4_alignto_m1
+    - opencood/logs/HEAL_ZERO_START_2080TI/stage1/m1_base
+  final_checkpoint: opencood/logs/HEAL_ZERO_START_2080TI/final_infer/net_epoch1.pth
+  object_stage3_base: opencood/logs/HEAL_ZERO_START_2080TI/final_infer/net_epoch1.pth
+  object_stage3_checkpoint: opencood/logs/HEAL_ZERO_START_2080TI/object_stage3/stage3_best.pth
