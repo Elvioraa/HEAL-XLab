@@ -146,6 +146,21 @@ def inference_early_fusion(batch_data, model, dataset):
                              output_dict)
 
     ego_output = output_dict['ego']
+    if (
+        getattr(model, "open_dcsi_enabled", False)
+        and "open_dcsi" in ego_output
+        and hasattr(model, "open_dcsi_config")
+    ):
+        from opencood.models.sub_modules.open_dcsi.inference import (
+            apply_open_dcsi_box_refinement,
+        )
+
+        pred_box_tensor, pred_score = apply_open_dcsi_box_refinement(
+            pred_box_tensor,
+            pred_score,
+            ego_output["open_dcsi"],
+            model.open_dcsi_config,
+        )
     if ego_output.get('box_packet_nojoint_enabled', False):
         required_keys = (
             'box_packet_pred_box_tensor',
