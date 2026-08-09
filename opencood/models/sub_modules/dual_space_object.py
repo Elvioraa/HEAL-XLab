@@ -835,6 +835,10 @@ def predict_scene_residuals(model, scene, proposals):
         raw_geometry = proposal_geometry_raw(
             selected_proposals, model.dual_space_bev_geometry
         )
+        raw_geometry = raw_geometry.to(
+            device=object_embedding.device,
+            dtype=object_embedding.dtype,
+        )
         geometry_embedding = model.dual_space_shared_geometry_encoder(raw_geometry)
         individual_residuals = model.dual_space_shared_object_refiner(
             object_embedding, geometry_embedding

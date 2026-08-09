@@ -689,6 +689,83 @@ def test_geometry_encoding():
     assert torch.allclose(raw[0, 3:6], torch.log(torch.tensor([4.0, 2.0, 1.5])))
 
 
+def make_dtype_regression_case(device="cpu"):
+    torch.manual_seed(17)
+    host = TinyHost(["m1", "m2"], mode="inference").to(device).eval()
+    features = torch.randn(2, 4, 32, 32, device=device, dtype=torch.float32)
+    proposals = make_boxes(3, device=device)
+    proposals[:, 0] = proposals.new_tensor([-4.0, 0.0, 4.0])
+    proposals[:, 1] = proposals.new_tensor([2.0, -2.0, 1.0])
+    with torch.no_grad():
+        host.dual_space_shared_object_refiner.network[-1].weight.normal_(0, 0.01)
+    return host, make_scene(features, ["m1", "m2"]), proposals
+
+
+@test("float64 proposals are canonicalized at the Object-Space geometry boundary")
+def test_float64_proposal_geometry_boundary():
+    host, scene, proposals = make_dtype_regression_case()
+    proposals = proposals.to(dtype=torch.float64)
+    observed = {}
+
+    def geometry_pre_hook(module, inputs):
+        observed["geometry_input_dtype"] = inputs[0].dtype
+        observed["geometry_weight_dtype"] = next(module.parameters()).dtype
+
+    def refiner_pre_hook(module, inputs):
+        observed["object_embedding_dtype"] = inputs[0].dtype
+        observed["geometry_embedding_dtype"] = inputs[1].dtype
+
+    handles = (
+        host.dual_space_shared_geometry_encoder.register_forward_pre_hook(
+            geometry_pre_hook
+        ),
+        host.dual_space_shared_object_refiner.register_forward_pre_hook(
+            refiner_pre_hook
+        ),
+    )
+    try:
+        with torch.no_grad():
+            result = predict_scene_residuals(host, scene, proposals)
+    finally:
+        for handle in handles:
+            handle.remove()
+
+    assert observed == {
+        "geometry_input_dtype": torch.float32,
+        "geometry_weight_dtype": torch.float32,
+        "object_embedding_dtype": torch.float32,
+        "geometry_embedding_dtype": torch.float32,
+    }
+    assert result["individual_residuals"].dtype == torch.float32
+    assert result["fused_residuals"].dtype == torch.float32
+    assert torch.isfinite(result["individual_residuals"]).all()
+    assert torch.isfinite(result["refined_boxes"]).all()
+
+
+@test("float32 proposal path remains numerically unchanged")
+def test_float32_proposal_path_unchanged():
+    host, scene, proposals = make_dtype_regression_case()
+    with torch.no_grad():
+        float32_result = predict_scene_residuals(host, scene, proposals)
+        float64_result = predict_scene_residuals(
+            host, scene, proposals.to(dtype=torch.float64)
+        )
+
+    assert torch.count_nonzero(float32_result["individual_residuals"]) > 0
+    for key in ("individual_residuals", "per_agent_residuals", "fused_residuals"):
+        assert torch.allclose(
+            float64_result[key], float32_result[key], atol=1e-6, rtol=1e-6
+        )
+    assert float32_result["refined_boxes"].dtype == torch.float32
+    assert float64_result["refined_boxes"].dtype == torch.float64
+    assert torch.allclose(
+        float64_result["refined_boxes"].float(),
+        float32_result["refined_boxes"],
+        atol=1e-6,
+        rtol=1e-6,
+    )
+
+
 @test("same-forward context spatially warps each agent to ego and retains labels")
 def test_common_bev_context_warp():
     host = TinyHost(["m1", "m2"], mode="inference", channels=1)
@@ -726,4 +803,44 @@ def main():
 
 
 if __name__ == "__main__":
+    if torch.cuda.is_available():
+        @test("CUDA autocast accepts float64 proposals at the Object-Space boundary")
+        def test_cuda_autocast_float64_proposals():
+            host, scene, proposals = make_dtype_regression_case("cuda")
+            proposals = proposals.to(dtype=torch.float64)
+            observed = {}
+
+            def geometry_pre_hook(module, inputs):
+                observed["geometry_input_dtype"] = inputs[0].dtype
+
+            def refiner_pre_hook(module, inputs):
+                observed["object_embedding_dtype"] = inputs[0].dtype
+
+            handles = (
+                host.dual_space_shared_geometry_encoder.register_forward_pre_hook(
+                    geometry_pre_hook
+                ),
+                host.dual_space_shared_object_refiner.register_forward_pre_hook(
+                    refiner_pre_hook
+                ),
+            )
+            try:
+                with torch.no_grad():
+                    with torch.autocast(device_type="cuda", dtype=torch.float16):
+                        result = predict_scene_residuals(host, scene, proposals)
+            finally:
+                for handle in handles:
+                    handle.remove()
+
+            assert observed["geometry_input_dtype"] == observed[
+                "object_embedding_dtype"
+            ]
+            assert result["individual_residuals"].device.type == "cuda"
+            assert torch.isfinite(result["individual_residuals"]).all()
+            assert torch.isfinite(result["refined_boxes"]).all()
+    else:
+        print(
+            "[SKIP] CUDA autocast float64 proposal regression: "
+            "local environment lacks CUDA"
+        )
     sys.exit(main())
