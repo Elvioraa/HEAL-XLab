@@ -208,7 +208,7 @@ class PyramidFusion(ResNetBEVBackbone):
                 nn.Conv2d(self.model_cfg["num_filters"][i], 1, kernel_size=1),
             )
 
-    def forward_single(self, spatial_features):
+    def forward_single(self, spatial_features, return_pre_fusion_features=False):
         """
         This is used for single agent pass.
         """
@@ -219,12 +219,15 @@ class PyramidFusion(ResNetBEVBackbone):
             occ_map_list.append(occ_map)
         final_feature = self.decode_multiscale_feature(feature_list)
 
+        if return_pre_fusion_features:
+            return final_feature, occ_map_list, tuple(feature_list)
         return final_feature, occ_map_list
     
     def forward_collab(self, spatial_features, record_len, affine_matrix,
                        agent_modality_list=None, cam_crop_info=None,
                        cbea_alpha=None, cbea_lambda=0.0, cbea_exclude_threshold=0.0,
-                       cbea_exclude_floor_mix=0.0, cbea_injection_strength=0.0):
+                       cbea_exclude_floor_mix=0.0, cbea_injection_strength=0.0,
+                       return_pre_fusion_features=False):
         """
         spatial_features : torch.tensor
             [sum(record_len), C, H, W]
@@ -284,8 +287,7 @@ class PyramidFusion(ResNetBEVBackbone):
 
                 score = score * cam_crop_mask
 
-            fused_feature_list.append(weighted_fuse(
-                feature_list[i],
+            fused_feature_list.append(weighted_fuse(feature_list[i],
                 score,
                 record_len,
                 affine_matrix,
@@ -299,4 +301,6 @@ class PyramidFusion(ResNetBEVBackbone):
         fused_feature = self.decode_multiscale_feature(fused_feature_list)
 
         
+        if return_pre_fusion_features:
+            return fused_feature, occ_map_list, tuple(feature_list)
         return fused_feature, occ_map_list

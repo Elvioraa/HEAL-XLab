@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from opencood.loss.point_pillar_depth_loss import PointPillarDepthLoss
 from opencood.loss.point_pillar_loss import sigmoid_focal_loss
 from opencood.loss.hvp_cbea_aux_loss import compute_pact_cbea_local_evidence_loss
+from opencood.loss.dual_space_object_loss import compute_dual_space_object_loss
 
 class PointPillarPyramidLoss(PointPillarDepthLoss):
     def __init__(self, args):
@@ -21,11 +22,21 @@ class PointPillarPyramidLoss(PointPillarDepthLoss):
     
     def forward(self, output_dict, target_dict, suffix=""):
         if output_dict['pyramid'] == 'collab': # intermediate fusion, pyramid collab.
-            return self.forward_collab(output_dict, target_dict, suffix)
+            total_loss = self.forward_collab(output_dict, target_dict, suffix)
 
         elif output_dict['pyramid'] == 'single': # late fusion, pyramid single 
-            return self.forward_single(output_dict, target_dict, suffix)
-        raise
+            total_loss = self.forward_single(output_dict, target_dict, suffix)
+        else:
+            raise ValueError("unknown pyramid loss mode %r" % output_dict['pyramid'])
+
+        if suffix == "" and "dual_space_object" in output_dict:
+            object_loss, object_stats = compute_dual_space_object_loss(
+                output_dict["dual_space_object"]
+            )
+            total_loss = total_loss + object_loss
+            self.loss_dict.update(object_stats)
+            self.loss_dict['total_loss'] = total_loss.item()
+        return total_loss
         
     def forward_single(self, output_dict, target_dict, suffix):
         """
@@ -188,6 +199,32 @@ class PointPillarPyramidLoss(PointPillarDepthLoss):
             'pact_cbea_descriptor_loss',
             0,
         )
+        dual_space_enabled = (
+            suffix == "" and self.loss_dict.get('dual_space_enabled', False)
+        )
+        dual_space_object_loss = self.loss_dict.get('dual_space_object_loss', 0)
+        dual_space_individual_loss = self.loss_dict.get(
+            'dual_space_individual_loss', 0
+        )
+        dual_space_consensus_loss = self.loss_dict.get(
+            'dual_space_consensus_loss', 0
+        )
+        dual_space_valid_ratio = self.loss_dict.get(
+            'dual_space_valid_object_ratio', 0
+        )
+        dual_space_mean_coverage = self.loss_dict.get(
+            'dual_space_mean_roi_coverage', 0
+        )
+        dual_space_quality_present = 'dual_space_quality_loss' in self.loss_dict
+        dual_space_quality_loss = self.loss_dict.get(
+            'dual_space_quality_loss', 0
+        )
+        dual_space_mean_quality = self.loss_dict.get(
+            'dual_space_mean_pred_quality', 0
+        )
+        dual_space_mean_quality_target = self.loss_dict.get(
+            'dual_space_mean_quality_target', 0
+        )
 
         log_msg = ("[epoch %d][%d/%d]%s || Loss: %.4f || Conf Loss: %.4f"
                    " || Loc Loss: %.4f || Dir Loss: %.4f || IoU Loss: %.4f"
@@ -226,6 +263,27 @@ class PointPillarPyramidLoss(PointPillarDepthLoss):
                 pact_cbea_uncertainty_loss,
                 pact_cbea_descriptor_loss,
             )
+        if dual_space_enabled:
+            log_msg += (
+                " || DS Object Loss: %.3e || DS Individual: %.3e"
+                " || DS Consensus: %.3e || DS Valid: %.3f"
+                " || DS Coverage: %.3f"
+            ) % (
+                dual_space_object_loss,
+                dual_space_individual_loss,
+                dual_space_consensus_loss,
+                dual_space_valid_ratio,
+                dual_space_mean_coverage,
+            )
+            if dual_space_quality_present:
+                log_msg += (
+                    " || DS Quality Loss: %.3e || DS Mean q: %.3f"
+                    " || DS Mean q_target: %.3f"
+                ) % (
+                    dual_space_quality_loss,
+                    dual_space_mean_quality,
+                    dual_space_mean_quality_target,
+                )
         print(log_msg)
 
         if not writer is None:
@@ -276,4 +334,30 @@ class PointPillarPyramidLoss(PointPillarDepthLoss):
                 writer.add_scalar('PACT_CBEA_evidence_descriptor_loss' + suffix,
                                 pact_cbea_descriptor_loss,
                                 epoch*batch_len + batch_id)
+            if dual_space_enabled:
+                writer.add_scalar('DualSpace_object_loss' + suffix,
+                                  dual_space_object_loss,
+                                  epoch*batch_len + batch_id)
+                writer.add_scalar('DualSpace_individual_loss' + suffix,
+                                  dual_space_individual_loss,
+                                  epoch*batch_len + batch_id)
+                writer.add_scalar('DualSpace_consensus_loss' + suffix,
+                                  dual_space_consensus_loss,
+                                  epoch*batch_len + batch_id)
+                writer.add_scalar('DualSpace_valid_object_ratio' + suffix,
+                                  dual_space_valid_ratio,
+                                  epoch*batch_len + batch_id)
+                writer.add_scalar('DualSpace_mean_roi_coverage' + suffix,
+                                  dual_space_mean_coverage,
+                                  epoch*batch_len + batch_id)
+                if dual_space_quality_present:
+                    writer.add_scalar('DualSpace_quality_loss' + suffix,
+                                      dual_space_quality_loss,
+                                      epoch*batch_len + batch_id)
+                    writer.add_scalar('DualSpace_mean_pred_quality' + suffix,
+                                      dual_space_mean_quality,
+                                      epoch*batch_len + batch_id)
+                    writer.add_scalar('DualSpace_mean_quality_target' + suffix,
+                                      dual_space_mean_quality_target,
+                                      epoch*batch_len + batch_id)
 

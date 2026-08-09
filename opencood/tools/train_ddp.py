@@ -77,6 +77,7 @@ def main():
 
     print('Creating Model')
     model = train_utils.create_model(hypes)
+    train_utils.validate_initialization_source(model, opt.model_dir)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # record lowest validation loss checkpoint.

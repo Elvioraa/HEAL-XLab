@@ -15,6 +15,16 @@ from opencood.models.sub_modules.naive_compress import NaiveCompressor
 from opencood.models.fuse_modules.pyramid_fuse import PyramidFusion
 from opencood.utils.transformation_utils import normalize_pairwise_tfm
 from opencood.utils.model_utils import check_trainable_module, fix_bn, unfix_bn
+from opencood.models.sub_modules.dual_space_object import (
+    assert_dual_space_runtime_ready,
+    attach_collab_dual_space_pyramid_context,
+    attach_remote_detector_proposals,
+    build_collab_dual_space_context,
+    configure_dual_space_trainability,
+    install_dual_space_modules,
+    run_dual_space_training,
+    validate_dual_space_checkpoint_keys,
+)
 import importlib
 import torchvision
 
@@ -113,6 +123,7 @@ class HeterPyramidCollab(nn.Module):
             self.compressor = NaiveCompressor(args['compressor']['input_dim'],
                                               args['compressor']['compress_ratio'])
 
+        install_dual_space_modules(self, args)
         self.model_train_init()
         # check again which module is not fixed.
         check_trainable_module(self)
@@ -129,9 +140,17 @@ class HeterPyramidCollab(nn.Module):
             self.compressor.train()
             for p in self.compressor.parameters():
                 p.requires_grad_(True)
+        configure_dual_space_trainability(self)
+
+    def validate_dual_space_checkpoint_keys(self, checkpoint_keys):
+        """Validate optional DS-V1 weights before HEAL's non-strict load."""
+        validate_dual_space_checkpoint_keys(self, checkpoint_keys)
 
     def forward(self, data_dict):
         output_dict = {'pyramid': 'collab'}
+        if getattr(self, 'dual_space_enabled', False):
+            assert_dual_space_runtime_ready(self)
+            configure_dual_space_trainability(self)
         agent_modality_list = data_dict['agent_modality_list'] 
         affine_matrix = normalize_pairwise_tfm(data_dict['pairwise_t_matrix'], self.H, self.W, self.fake_voxel_size)
         record_len = data_dict['record_len'] 
@@ -181,16 +200,63 @@ class HeterPyramidCollab(nn.Module):
         if self.compress:
             heter_feature_2d = self.compressor(heter_feature_2d)
 
+        dual_space_context = None
+        if getattr(self, 'dual_space_enabled', False):
+            if self.dual_space_flags['quality']:
+                dual_space_context = build_collab_dual_space_context(
+                    self,
+                    heter_feature_2d,
+                    record_len,
+                    affine_matrix,
+                    agent_modality_list,
+                    pairwise_t_matrix=data_dict['pairwise_t_matrix'],
+                )
+            else:
+                dual_space_context = build_collab_dual_space_context(
+                    self,
+                    heter_feature_2d,
+                    record_len,
+                    affine_matrix,
+                    agent_modality_list,
+                )
+
         # heter_feature_2d is downsampled 2x
         # add croping information to collaboration module
         
-        fused_feature, occ_outputs = self.pyramid_backbone.forward_collab(
-                                                heter_feature_2d,
-                                                record_len, 
-                                                affine_matrix, 
-                                                agent_modality_list, 
-                                                self.cam_crop_info
-                                            )
+        capture_pyramid = bool(
+            getattr(self, 'dual_space_enabled', False)
+            and (
+                self.dual_space_flags['multi_scale']
+                or self.dual_space_flags['remote_proposal_rescue']
+            )
+        )
+        if capture_pyramid:
+            fused_feature, occ_outputs, pre_fusion_features = (
+                self.pyramid_backbone.forward_collab(
+                    heter_feature_2d,
+                    record_len,
+                    affine_matrix,
+                    agent_modality_list,
+                    self.cam_crop_info,
+                    return_pre_fusion_features=True,
+                )
+            )
+            attach_collab_dual_space_pyramid_context(
+                self,
+                dual_space_context,
+                pre_fusion_features,
+                record_len,
+                affine_matrix,
+                agent_modality_list,
+            )
+        else:
+            fused_feature, occ_outputs = self.pyramid_backbone.forward_collab(
+                                                    heter_feature_2d,
+                                                    record_len,
+                                                    affine_matrix,
+                                                    agent_modality_list,
+                                                    self.cam_crop_info
+                                                )
 
         if self.shrink_flag:
             fused_feature = self.shrink_conv(fused_feature)
@@ -205,5 +271,18 @@ class HeterPyramidCollab(nn.Module):
         
         output_dict.update({'occ_single_list': 
                             occ_outputs})
+
+        if getattr(self, 'dual_space_enabled', False):
+            if self.dual_space_flags['remote_proposal_rescue']:
+                attach_remote_detector_proposals(
+                    self, dual_space_context, data_dict
+                )
+            dual_space_object = run_dual_space_training(
+                self, dual_space_context, data_dict, detector_output=output_dict
+            )
+            if dual_space_object is not None:
+                output_dict['dual_space_object'] = dual_space_object
+            if self.dual_space_config['mode'] == 'inference':
+                output_dict['dual_space_context'] = dual_space_context
 
         return output_dict

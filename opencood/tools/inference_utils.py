@@ -146,6 +146,21 @@ def inference_early_fusion(batch_data, model, dataset):
                              output_dict)
 
     ego_output = output_dict['ego']
+    if getattr(model, "dual_space_enabled", False):
+        if "dual_space_context" not in ego_output:
+            raise RuntimeError(
+                "dual-space inference output is missing same-forward Common-BEV context"
+            )
+        from opencood.models.sub_modules.dual_space_object import (
+            refine_dual_space_detections,
+        )
+
+        pred_box_tensor, pred_score = refine_dual_space_detections(
+            model,
+            pred_box_tensor,
+            pred_score,
+            ego_output["dual_space_context"],
+        )
     if (
         getattr(model, "open_dcsi_enabled", False)
         and "open_dcsi" in ego_output
@@ -180,6 +195,13 @@ def inference_early_fusion(batch_data, model, dataset):
     return_dict = {"pred_box_tensor" : pred_box_tensor, \
                     "pred_score" : pred_score, \
                     "gt_box_tensor" : gt_box_tensor}
+    if (
+        getattr(model, "dual_space_enabled", False)
+        and model.dual_space_flags["report_stats"]
+    ):
+        return_dict["dual_space_stats"] = ego_output[
+            "dual_space_context"
+        ].get("dual_space_stats", {})
     if "depth_items" in output_dict['ego']:
         return_dict.update({"depth_items" : output_dict['ego']['depth_items']})
     return return_dict

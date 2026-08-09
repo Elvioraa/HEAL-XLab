@@ -101,6 +101,123 @@ def merge_dict(single_model_dict, stage1_model_dict):
         merged_dict[key] = stage1_model_dict[key]
 
     return merged_dict
+
+
+def apply_dual_space_merge_ownership(merged_dict, ordered_stage_dicts):
+    """Overlay feature-aware Dual-Space keys using explicit ownership.
+
+    ``ordered_stage_dicts`` must follow the documented merge_final order:
+    Stage2 m2, Stage2 m3, Stage2 m4, then Stage1 m1.  Legacy checkpoints with
+    no ``dual_space_`` keys return through unchanged.
+    """
+    has_dual_space = any(
+        key.startswith('dual_space_')
+        for state_dict in ordered_stage_dicts
+        for key in state_dict
+    )
+    if not has_dual_space:
+        return merged_dict
+    if len(ordered_stage_dicts) != 4:
+        raise RuntimeError(
+            'DS-V1 merge_final requires checkpoints ordered as m2, m3, m4, m1'
+        )
+
+    result = OrderedDict(merged_dict)
+    stage2_by_modality = {
+        'm2': ordered_stage_dicts[0],
+        'm3': ordered_stage_dicts[1],
+        'm4': ordered_stage_dicts[2],
+    }
+    stage1_m1 = ordered_stage_dicts[3]
+    shared_owners = (
+        ('dual_space_shared_object_encoder.', 'shared_object_encoder'),
+        ('dual_space_shared_geometry_encoder.', 'shared_geometry_encoder'),
+        ('dual_space_shared_object_refiner.', 'shared_object_refiner'),
+        ('dual_space_shared_context_encoder.', 'shared_context_encoder'),
+        ('dual_space_shared_multiscale_fusion.', 'shared_multiscale_fusion'),
+        ('dual_space_shared_scale_gate.', 'shared_scale_gate'),
+        ('dual_space_shared_quality_head.', 'shared_quality_head'),
+    )
+    shared_prefixes = tuple(prefix for prefix, _ in shared_owners)
+
+    print('[DualSpace Merge]')
+    for prefix, label in shared_owners:
+        if not any(
+            key.startswith(prefix)
+            for state_dict in ordered_stage_dicts
+            for key in state_dict
+        ):
+            continue
+        _replace_owned_prefix(result, stage1_m1, prefix, 'stage1/m1')
+        print('%s <- stage1/m1' % label)
+
+    stage1_shared_keys = {
+        key for key in stage1_m1 if key.startswith(shared_prefixes)
+    }
+    for modality, source in stage2_by_modality.items():
+        source_shared_keys = {
+            key for key in source if key.startswith(shared_prefixes)
+        }
+        # Real Stage2 checkpoints retain the frozen shared backend.  When it
+        # is present, require the exact current-profile key contract.  Tiny
+        # adapter-only synthetic dictionaries remain valid merge fixtures.
+        if source_shared_keys and source_shared_keys != stage1_shared_keys:
+            missing = sorted(stage1_shared_keys - source_shared_keys)
+            extra = sorted(source_shared_keys - stage1_shared_keys)
+            details = []
+            if missing:
+                details.append('missing shared keys: %s' % ', '.join(missing))
+            if extra:
+                details.append('unexpected shared keys: %s' % ', '.join(extra))
+            raise RuntimeError(
+                '[DualSpace Merge] stage2/%s profile does not match stage1/m1; %s'
+                % (modality, '; '.join(details))
+            )
+
+    require_detail_adapters = any(
+        key.startswith((
+            'dual_space_shared_object_encoder.',
+            'dual_space_shared_geometry_encoder.',
+            'dual_space_shared_object_refiner.',
+        ))
+        for key in stage1_m1
+    )
+    require_context_adapters = any(
+        key.startswith((
+            'dual_space_shared_context_encoder.',
+            'dual_space_shared_multiscale_fusion.',
+            'dual_space_shared_scale_gate.',
+        ))
+        for key in stage1_m1
+    )
+    for modality, source in stage2_by_modality.items():
+        for adapter_kind in ('object_adapter', 'context_adapter'):
+            prefix = 'dual_space_%s_%s.' % (adapter_kind, modality)
+            required = (
+                require_detail_adapters
+                if adapter_kind == 'object_adapter'
+                else require_context_adapters
+            )
+            present = any(key.startswith(prefix) for key in source)
+            if not required and not present:
+                continue
+            _replace_owned_prefix(result, source, prefix, 'stage2/%s' % modality)
+            print('%s_%s <- stage2/%s' % (
+                adapter_kind, modality, modality
+            ))
+    return result
+
+
+def _replace_owned_prefix(destination, source, prefix, owner):
+    owned_keys = [key for key in source if key.startswith(prefix)]
+    if not owned_keys:
+        raise RuntimeError(
+            '[DualSpace Merge] %s has no required keys for %s' % (owner, prefix)
+        )
+    for key in [key for key in destination if key.startswith(prefix)]:
+        del destination[key]
+    for key in owned_keys:
+        destination[key] = source[key]
     
 def merge_and_save(single_model_dir, stage1_model_dir, output_model_dir):
     single_model_path = get_model_path_from_dir(single_model_dir)
@@ -121,10 +238,16 @@ def merge_and_save_final(aligned_model_dir_list, output_model_dir):
         model_dir.
     """
     final_dict = OrderedDict()
+    ordered_stage_dicts = []
     for aligned_model_dir in aligned_model_dir_list:
         aligned_model_path = get_model_path_from_dir(aligned_model_dir)
         model_dict = torch.load(aligned_model_path, map_location='cpu')
+        ordered_stage_dicts.append(model_dict)
         final_dict = merge_dict(final_dict, model_dict)
+
+    final_dict = apply_dual_space_merge_ownership(
+        final_dict, ordered_stage_dicts
+    )
 
     output_model_path = os.path.join(output_model_dir, 'net_epoch1.pth')
     torch.save(final_dict, output_model_path)

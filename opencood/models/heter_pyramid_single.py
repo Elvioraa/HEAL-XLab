@@ -15,6 +15,15 @@ from opencood.models.sub_modules.feature_alignnet import AlignNet
 from opencood.models.sub_modules.downsample_conv import DownsampleConv
 import importlib
 from opencood.utils.model_utils import check_trainable_module, fix_bn, unfix_bn
+from opencood.models.sub_modules.dual_space_object import (
+    assert_dual_space_runtime_ready,
+    attach_single_dual_space_pyramid_context,
+    build_single_dual_space_context,
+    configure_dual_space_trainability,
+    install_dual_space_modules,
+    run_dual_space_training,
+    validate_dual_space_checkpoint_keys,
+)
 
 class HeterPyramidSingle(nn.Module):
     def __init__(self, args):
@@ -85,7 +94,8 @@ class HeterPyramidSingle(nn.Module):
                                   kernel_size=1)
         self.dir_head = nn.Conv2d(args['in_head'], args['dir_args']['num_bins'] * args['anchor_number'],
                                   kernel_size=1) # BIN_NUM = 2
-        
+
+        install_dual_space_modules(self, args)
         self.model_train_init()
         # check again which module is not fixed.
         check_trainable_module(self)
@@ -95,9 +105,17 @@ class HeterPyramidSingle(nn.Module):
             for p in eval(f"self.{module}").parameters():
                 p.requires_grad_(False)
             eval(f"self.{module}").apply(fix_bn)
+        configure_dual_space_trainability(self)
+
+    def validate_dual_space_checkpoint_keys(self, checkpoint_keys):
+        """Validate optional DS-V1 weights before HEAL's non-strict load."""
+        validate_dual_space_checkpoint_keys(self, checkpoint_keys)
 
     def forward(self, data_dict):
         output_dict = {'pyramid': 'single'}
+        if getattr(self, 'dual_space_enabled', False):
+            assert_dual_space_runtime_ready(self)
+            configure_dual_space_trainability(self)
         modality_name = [x for x in list(data_dict.keys()) if x.startswith("inputs_")]
         assert len(modality_name) == 1
         modality_name = modality_name[0].lstrip('inputs_')
@@ -117,9 +135,38 @@ class HeterPyramidSingle(nn.Module):
                 output_dict.update({
                     f"depth_items_{modality_name}": eval(f"self.encoder_{modality_name}").depth_items
                 })
-        
-        # multiscale fusion. 
-        feature, occ_map_list = self.pyramid_backbone.forward_single(feature)
+
+        dual_space_context = None
+        if getattr(self, 'dual_space_enabled', False):
+            active_modality = self.dual_space_config.get('active_modality')
+            if active_modality is not None and active_modality != modality_name:
+                raise RuntimeError(
+                    'dual-space active_modality=%s but input key routes %s'
+                    % (active_modality, modality_name)
+                )
+            dual_space_context = build_single_dual_space_context(
+                self, feature, modality_name
+            )
+
+        # multiscale fusion.
+        capture_pyramid = bool(
+            getattr(self, 'dual_space_enabled', False)
+            and self.dual_space_flags['multi_scale']
+        )
+        if capture_pyramid:
+            feature, occ_map_list, pre_fusion_features = (
+                self.pyramid_backbone.forward_single(
+                    feature, return_pre_fusion_features=True
+                )
+            )
+            attach_single_dual_space_pyramid_context(
+                self,
+                dual_space_context,
+                pre_fusion_features,
+                modality_name,
+            )
+        else:
+            feature, occ_map_list = self.pyramid_backbone.forward_single(feature)
 
         if self.shrink_flag:
             feature = self.shrink_conv(feature)
@@ -133,4 +180,12 @@ class HeterPyramidSingle(nn.Module):
                             'dir_preds': dir_preds})
         output_dict.update({'occ_single_list': 
                             occ_map_list})
+        if getattr(self, 'dual_space_enabled', False):
+            dual_space_object = run_dual_space_training(
+                self, dual_space_context, data_dict, detector_output=output_dict
+            )
+            if dual_space_object is not None:
+                output_dict['dual_space_object'] = dual_space_object
+            if self.dual_space_config['mode'] == 'inference':
+                output_dict['dual_space_context'] = dual_space_context
         return output_dict

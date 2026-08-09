@@ -87,6 +87,7 @@ def load_saved_model(saved_path, model):
         print("resuming best validation model at epoch %d" % \
                 eval(file_list[0].split("/")[-1].rstrip(".pth").lstrip("net_epoch_bestval_at")))
         loaded_state_dict = torch.load(file_list[0] , map_location='cpu')
+        _validate_model_checkpoint_contract(model, loaded_state_dict)
         check_missing_key(model.state_dict(), loaded_state_dict)
         model.load_state_dict(loaded_state_dict, strict=False)
         return eval(file_list[0].split("/")[-1].rstrip(".pth").lstrip("net_epoch_bestval_at")), model
@@ -96,10 +97,47 @@ def load_saved_model(saved_path, model):
         print('resuming by loading epoch %d' % initial_epoch)
         loaded_state_dict = torch.load(os.path.join(saved_path,
                          'net_epoch%d.pth' % initial_epoch), map_location='cpu')
+        _validate_model_checkpoint_contract(model, loaded_state_dict)
         check_missing_key(model.state_dict(), loaded_state_dict)
         model.load_state_dict(loaded_state_dict, strict=False)
+    elif _model_requires_initialization_checkpoint(model):
+        raise RuntimeError(
+            "DualSpace %s requires a trained initialization checkpoint, but "
+            "no net_epoch*.pth was found in %s"
+            % (model.dual_space_config['mode'], saved_path)
+        )
+    elif getattr(model, 'dual_space_enabled', False):
+        print('[DualSpace] initialization=fresh')
 
     return initial_epoch, model
+
+
+def validate_initialization_source(model, model_dir):
+    """Reject fresh Stage2/inference DS-V1 startup before creating log output."""
+    if _model_requires_initialization_checkpoint(model) and not model_dir:
+        raise RuntimeError(
+            "DualSpace %s cannot start from random initialization; provide a "
+            "Stage1 dual-space checkpoint directory"
+            % model.dual_space_config['mode']
+        )
+    if (
+        getattr(model, 'dual_space_enabled', False)
+        and model.dual_space_config['mode'] == 'stage1_anchor'
+        and not model_dir
+    ):
+        print('[DualSpace] initialization=fresh')
+
+
+def _validate_model_checkpoint_contract(model, loaded_state_dict):
+    validator = getattr(model, 'validate_dual_space_checkpoint_keys', None)
+    if validator is not None:
+        validator(loaded_state_dict.keys())
+
+
+def _model_requires_initialization_checkpoint(model):
+    if not getattr(model, 'dual_space_enabled', False):
+        return False
+    return not bool(getattr(model, '_dual_space_checkpoint_ready', False))
 
 
 def setup_train(hypes):
@@ -171,6 +209,12 @@ def create_model(hypes):
                                                        target_model_name))
         exit(0)
     instance = model(backbone_config)
+    if getattr(instance, 'dual_space_enabled', False):
+        from opencood.models.sub_modules.dual_space_object import (
+            configure_dual_space_proposal_decoder,
+        )
+
+        configure_dual_space_proposal_decoder(instance, hypes)
     return instance
 
 
