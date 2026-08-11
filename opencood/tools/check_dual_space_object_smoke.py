@@ -54,10 +54,14 @@ def test(name):
     return register
 
 
-def dual_config(mode="stage1_anchor", active_modality=None):
+def dual_config(
+    mode="stage1_anchor", active_modality=None, yaw_mode="sin_cos"
+):
+    version = "ds_v1_1" if yaw_mode == "sin_cos_centered" else "ds_v1"
     config = {
         "enabled": True,
-        "version": "ds_v1",
+        "version": version,
+        "experiment_profile": version,
         "mode": mode,
         "allow_untrained_initialization": mode == "stage1_anchor",
         "roi": {
@@ -76,7 +80,7 @@ def dual_config(mode="stage1_anchor", active_modality=None):
         "geometry_encoder": {"enabled": True, "hidden_dim": 32},
         "refiner": {
             "hidden_dim": 128,
-            "yaw_mode": "sin_cos",
+            "yaw_mode": yaw_mode,
             "zero_init_output": True,
         },
         "consensus": {
@@ -109,7 +113,14 @@ def dual_config(mode="stage1_anchor", active_modality=None):
 
 
 class TinyHost(nn.Module):
-    def __init__(self, modalities, mode="stage1_anchor", active_modality=None, channels=4):
+    def __init__(
+        self,
+        modalities,
+        mode="stage1_anchor",
+        active_modality=None,
+        channels=4,
+        yaw_mode="sin_cos",
+    ):
         super().__init__()
         self.modality_name_list = list(modalities)
         self.sensor_type_dict = OrderedDict((name, "lidar") for name in modalities)
@@ -119,7 +130,7 @@ class TinyHost(nn.Module):
         )
         args = {
             "lidar_range": [-16.0, -16.0, -3.0, 16.0, 16.0, 1.0],
-            "dual_space": dual_config(mode, active_modality),
+            "dual_space": dual_config(mode, active_modality, yaw_mode),
         }
         for name in modalities:
             args[name] = {"backbone_args": {"num_filters": [channels]}}
@@ -152,7 +163,11 @@ def make_scene(features, modalities, support=None):
 
 
 def make_object_payload(result, targets, config, mode):
-    target_residuals = encode_box_residual(result["proposals"], targets)
+    target_residuals = encode_box_residual(
+        result["proposals"],
+        targets,
+        yaw_mode=config["refiner"]["yaw_mode"],
+    )
     indices = result["valid_mask"].nonzero(as_tuple=False)
     result = dict(result)
     result["target_residuals"] = target_residuals
@@ -207,7 +222,8 @@ def test_box_roundtrip():
     targets[:, :3] += torch.randn(8, 3) * 0.3
     targets[:, 3:6] *= torch.exp(torch.randn(8, 3) * 0.1)
     targets[:, 6] = wrap_angle(targets[:, 6] + torch.randn(8) * 0.2)
-    decoded = decode_box_residual(proposals, encode_box_residual(proposals, targets))
+    residuals = encode_box_residual(proposals, targets, yaw_mode="sin_cos")
+    decoded = decode_box_residual(proposals, residuals, yaw_mode="sin_cos")
     assert torch.max(torch.abs(decoded[:, :6] - targets[:, :6])).item() < 2e-5
     assert torch.max(torch.abs(wrap_angle(decoded[:, 6] - targets[:, 6]))).item() < 2e-5
 
@@ -218,10 +234,161 @@ def test_yaw_boundary():
     targets = proposals.clone()
     proposals[:, 6] = torch.deg2rad(torch.tensor([179.0, -179.0]))
     targets[:, 6] = torch.deg2rad(torch.tensor([-179.0, 179.0]))
-    residual = encode_box_residual(proposals, targets)
-    recovered = decode_box_residual(proposals, residual)
+    residual = encode_box_residual(proposals, targets, yaw_mode="sin_cos")
+    recovered = decode_box_residual(proposals, residual, yaw_mode="sin_cos")
     assert torch.max(torch.abs(wrap_angle(recovered[:, 6] - targets[:, 6]))).item() < 1e-5
     assert torch.max(torch.abs(torch.atan2(residual[:, 6], residual[:, 7]))).item() < 0.04
+
+
+@test("legacy sin-cos coder preserves its exact yaw representation")
+def test_legacy_yaw_regression():
+    proposals = make_boxes(4)
+    proposals[:, 6] = torch.tensor([-2.7, -0.2, 0.4, 2.8])
+    targets = proposals.clone()
+    targets[:, 6] = wrap_angle(
+        proposals[:, 6] + torch.tensor([0.0, -0.3, 0.2, 0.5])
+    )
+    dyaw = wrap_angle(targets[:, 6] - proposals[:, 6])
+    residuals = encode_box_residual(
+        proposals, targets, yaw_mode="sin_cos"
+    )
+    assert torch.equal(residuals[:, 6], torch.sin(dyaw))
+    assert torch.equal(residuals[:, 7], torch.cos(dyaw))
+    decoded = decode_box_residual(
+        proposals, residuals, yaw_mode="sin_cos"
+    )
+    assert torch.equal(decoded[:, :6], targets[:, :6])
+    assert torch.equal(
+        decoded[:, 6],
+        wrap_angle(proposals[:, 6] + torch.atan2(residuals[:, 6], residuals[:, 7])),
+    )
+
+
+@test("centered identity is batched and bit-exact in float32 and float64")
+def test_centered_identity_exact():
+    for dtype in (torch.float32, torch.float64):
+        proposals = make_boxes(6).to(dtype=dtype).reshape(2, 3, 7)
+        proposals[..., 0] = torch.arange(6, dtype=dtype).reshape(2, 3)
+        proposals[..., 1] = -proposals[..., 0]
+        proposals[..., 6] = torch.tensor(
+            [-3.0, -0.1, 0.0, 0.1, 1.7, 3.0], dtype=dtype
+        ).reshape(2, 3)
+        residuals = encode_box_residual(
+            proposals, proposals.clone(), yaw_mode="sin_cos_centered"
+        )
+        assert torch.equal(residuals, torch.zeros_like(residuals))
+        decoded = decode_box_residual(
+            proposals, torch.zeros_like(residuals),
+            yaw_mode="sin_cos_centered",
+        )
+        assert torch.equal(decoded, proposals)
+
+
+@test("centered coder round-trips signed yaw including both pi boundaries")
+def test_centered_roundtrip():
+    offsets = (0.0, 0.01, -0.01, 0.8, math.pi - 1e-4, -math.pi + 1e-4)
+    for dtype in (torch.float32, torch.float64):
+        proposals = make_boxes(len(offsets)).to(dtype=dtype)
+        proposals[:, 0] = torch.linspace(-2.0, 2.0, len(offsets), dtype=dtype)
+        proposals[:, 6] = torch.tensor(
+            [0.2, -0.4, 0.6, -1.1, 0.0, 0.0], dtype=dtype
+        )
+        targets = proposals.clone()
+        targets[:, 0] += 0.25
+        targets[:, 1] -= 0.15
+        targets[:, 2] += 0.05
+        targets[:, 3:6] *= torch.tensor([1.02, 0.97, 1.04], dtype=dtype)
+        targets[:, 6] = wrap_angle(
+            proposals[:, 6] + torch.tensor(offsets, dtype=dtype)
+        )
+        residuals = encode_box_residual(
+            proposals, targets, yaw_mode="sin_cos_centered"
+        )
+        decoded = decode_box_residual(
+            proposals, residuals, yaw_mode="sin_cos_centered"
+        )
+        tolerance = 2e-5 if dtype == torch.float32 else 1e-10
+        assert torch.allclose(decoded[:, :6], targets[:, :6], atol=tolerance, rtol=0)
+        assert torch.max(torch.abs(wrap_angle(decoded[:, 6] - targets[:, 6]))) < tolerance
+
+
+@test("box coder rejects every unknown yaw mode")
+def test_unknown_yaw_mode():
+    proposals = make_boxes(1)
+    calls = (
+        lambda: encode_box_residual(proposals, proposals, yaw_mode="unknown"),
+        lambda: decode_box_residual(
+            proposals, torch.zeros(1, 8), yaw_mode="unknown"
+        ),
+    )
+    for call in calls:
+        try:
+            call()
+        except ValueError as error:
+            assert "yaw_mode" in str(error)
+        else:
+            raise AssertionError("unknown yaw mode was silently accepted")
+
+
+@test("Dual-Space config rejects an unknown yaw mode")
+def test_config_unknown_yaw_mode():
+    try:
+        TinyHost(["m1"], yaw_mode="unknown")
+    except ValueError as error:
+        assert "refiner.yaw_mode" in str(error)
+    else:
+        raise AssertionError("unknown config yaw mode was silently accepted")
+
+
+@test("centered uniform consensus is the legacy circular yaw mean")
+def test_centered_uniform_circular_consensus():
+    proposal = make_boxes(1)
+    angles = torch.deg2rad(torch.tensor([179.0, -179.0, 170.0, -170.0]))
+    repeated = proposal.expand(angles.shape[0], -1).clone()
+    targets = repeated.clone()
+    targets[:, 6] = angles
+    legacy = encode_box_residual(repeated, targets, yaw_mode="sin_cos")
+    centered = encode_box_residual(
+        repeated, targets, yaw_mode="sin_cos_centered"
+    )
+    valid = torch.ones(1, angles.shape[0], dtype=torch.bool)
+    legacy_fused = uniform_geometry_consensus(
+        legacy.unsqueeze(0), valid
+    )[0]
+    centered_fused = uniform_geometry_consensus(
+        centered.unsqueeze(0), valid
+    )[0]
+    legacy_box = decode_box_residual(
+        proposal, legacy_fused, yaw_mode="sin_cos"
+    )
+    centered_box = decode_box_residual(
+        proposal, centered_fused, yaw_mode="sin_cos_centered"
+    )
+    assert torch.allclose(
+        wrap_angle(centered_box[:, 6] - legacy_box[:, 6]),
+        torch.zeros(1),
+        atol=1e-6,
+    )
+    single_fused = uniform_geometry_consensus(
+        centered[:1].unsqueeze(0), torch.ones(1, 1, dtype=torch.bool)
+    )[0]
+    assert torch.equal(single_fused[0], centered[0])
+
+
+@test("legacy and centered models keep identical state keys and shapes")
+def test_centered_state_schema_compatibility():
+    legacy = TinyHost(["m1"], yaw_mode="sin_cos")
+    centered = TinyHost(["m1"], yaw_mode="sin_cos_centered")
+    legacy_state = legacy.state_dict()
+    centered_state = centered.state_dict()
+    assert tuple(legacy_state) == tuple(centered_state)
+    for key in legacy_state:
+        assert legacy_state[key].shape == centered_state[key].shape
+    assert legacy.dual_space_config["refiner"]["yaw_mode"] == "sin_cos"
+    assert (
+        centered.dual_space_config["refiner"]["yaw_mode"]
+        == "sin_cos_centered"
+    )
 
 
 def check_roi_shape(agent_count, proposal_count):
@@ -297,16 +464,20 @@ def test_roi_coverage():
 
 @test("all-invalid agents fall back exactly to original proposal")
 def test_no_valid_fallback():
-    host = TinyHost(["m1", "m2"], mode="inference")
-    features = torch.randn(2, 4, 32, 32)
-    support = torch.zeros(2, 1, 32, 32)
-    proposals = make_boxes(2)
-    result = predict_scene_residuals(
-        host, make_scene(features, ["m1", "m2"], support), proposals
-    )
-    assert not bool(result["any_valid"].any())
-    assert torch.equal(result["refined_boxes"], proposals)
-    assert torch.isfinite(result["refined_boxes"]).all()
+    for yaw_mode in ("sin_cos", "sin_cos_centered"):
+        host = TinyHost(
+            ["m1", "m2"], mode="inference", yaw_mode=yaw_mode
+        )
+        features = torch.randn(2, 4, 32, 32)
+        support = torch.zeros(2, 1, 32, 32)
+        proposals = make_boxes(2)
+        proposals[:, 6] = torch.tensor([-0.1, 2.7])
+        result = predict_scene_residuals(
+            host, make_scene(features, ["m1", "m2"], support), proposals
+        )
+        assert not bool(result["any_valid"].any())
+        assert torch.equal(result["refined_boxes"], proposals)
+        assert torch.isfinite(result["refined_boxes"]).all()
 
 
 @test("single valid agent is the exact consensus residual")
@@ -351,16 +522,20 @@ def test_adapter_zero_init():
 
 @test("shared refiner zero init decodes to original proposal")
 def test_refiner_zero_init():
-    host = TinyHost(["m1"])
-    roi = torch.randn(2, 4, 5, 5)
-    proposals = make_boxes(2)
-    z = host.dual_space_shared_object_encoder(roi)
-    g = host.dual_space_shared_geometry_encoder(
-        proposal_geometry_raw(proposals, host.dual_space_bev_geometry)
-    )
-    residuals = host.dual_space_shared_object_refiner(z, g)
-    assert torch.equal(residuals, torch.zeros_like(residuals))
-    assert torch.equal(decode_box_residual(proposals, residuals), proposals)
+    for yaw_mode in ("sin_cos", "sin_cos_centered"):
+        host = TinyHost(["m1"], yaw_mode=yaw_mode)
+        roi = torch.randn(2, 4, 5, 5)
+        proposals = make_boxes(2)
+        z = host.dual_space_shared_object_encoder(roi)
+        g = host.dual_space_shared_geometry_encoder(
+            proposal_geometry_raw(proposals, host.dual_space_bev_geometry)
+        )
+        residuals = host.dual_space_shared_object_refiner(z, g)
+        assert torch.equal(residuals, torch.zeros_like(residuals))
+        assert torch.equal(
+            decode_box_residual(proposals, residuals, yaw_mode=yaw_mode),
+            proposals,
+        )
 
 
 @test("Stage1 object loss reaches shared modules and base BEV branch")
@@ -804,6 +979,29 @@ def main():
 
 if __name__ == "__main__":
     if torch.cuda.is_available():
+        @test("CUDA autocast preserves centered zero identity")
+        def test_cuda_centered_identity():
+            proposals = make_boxes(4, device="cuda")
+            proposals[:, 6] = torch.tensor(
+                [-3.0, -0.1, 0.1, 3.0], device="cuda"
+            )
+            with torch.autocast(device_type="cuda", dtype=torch.float16):
+                residuals = encode_box_residual(
+                    proposals,
+                    proposals.clone(),
+                    yaw_mode="sin_cos_centered",
+                )
+                decoded = decode_box_residual(
+                    proposals,
+                    residuals,
+                    yaw_mode="sin_cos_centered",
+                )
+            assert residuals.dtype == proposals.dtype
+            assert residuals.device == proposals.device
+            assert torch.equal(residuals, torch.zeros_like(residuals))
+            assert torch.equal(decoded, proposals)
+
+
         @test("CUDA autocast accepts float64 proposals at the Object-Space boundary")
         def test_cuda_autocast_float64_proposals():
             host, scene, proposals = make_dtype_regression_case("cuda")
@@ -839,6 +1037,10 @@ if __name__ == "__main__":
             assert torch.isfinite(result["individual_residuals"]).all()
             assert torch.isfinite(result["refined_boxes"]).all()
     else:
+        print(
+            "[SKIP] CUDA centered identity regression: "
+            "local environment lacks CUDA"
+        )
         print(
             "[SKIP] CUDA autocast float64 proposal regression: "
             "local environment lacks CUDA"

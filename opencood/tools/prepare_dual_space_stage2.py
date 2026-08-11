@@ -76,7 +76,55 @@ def preflight_stage2_configs(profile_dir):
             "config": config,
             "dual_space": dual,
         }
+    yaw_modes = {
+        item["dual_space"]["refiner"]["yaw_mode"] for item in result.values()
+    }
+    if len(yaw_modes) != 1:
+        raise ValueError("Stage2 configs do not share one refiner.yaw_mode")
     return profile, version, result
+
+
+def preflight_stage1_seed_config(
+    stage1_dir, expected_profile, expected_version, expected_yaw_mode
+):
+    """Validate the semantic identity of the Stage1 checkpoint directory."""
+    config_path = os.path.join(os.path.abspath(stage1_dir), "config.yaml")
+    if not os.path.isfile(config_path):
+        raise FileNotFoundError(
+            "Stage1 seed directory is missing config.yaml: %s" % config_path
+        )
+    config = load_yaml(config_path, None)
+    try:
+        dual = config["model"]["args"]["dual_space"]
+    except (KeyError, TypeError) as error:
+        raise ValueError(
+            "Stage1 seed config is missing model.args.dual_space"
+        ) from error
+    validate_dual_space_config(dual)
+    if dual["mode"] != "stage1_anchor":
+        raise ValueError("Stage1 seed config must use dual_space.mode=stage1_anchor")
+    if dual["allow_untrained_initialization"] is not True:
+        raise ValueError(
+            "Stage1 seed config must preserve its stage1 initialization contract"
+        )
+    profile = dual.get("experiment_profile", dual["version"])
+    yaw_mode = dual["refiner"]["yaw_mode"]
+    if profile != expected_profile or dual["version"] != expected_version:
+        raise ValueError(
+            "Stage1 seed profile/version mismatch: expected %s/%s, got %s/%s"
+            % (expected_profile, expected_version, profile, dual["version"])
+        )
+    if yaw_mode != expected_yaw_mode:
+        raise ValueError(
+            "Stage1 seed refiner.yaw_mode mismatch: expected %s, got %s"
+            % (expected_yaw_mode, yaw_mode)
+        )
+    return {
+        "path": config_path,
+        "profile": profile,
+        "version": dual["version"],
+        "yaw_mode": yaw_mode,
+    }
 
 
 def prepare_dual_space_stage2(profile_dir, stage1_dir, stage2_dir):
@@ -91,6 +139,12 @@ def prepare_dual_space_stage2(profile_dir, stage1_dir, stage2_dir):
     stage2_dir = os.path.abspath(stage2_dir)
     stage1_best = find_unique_stage1_best(stage1_dir)
     profile, version, configs = preflight_stage2_configs(profile_dir)
+    target_yaw_mode = configs[STAGE2_MODALITIES[0]]["dual_space"]["refiner"][
+        "yaw_mode"
+    ]
+    stage1_contract = preflight_stage1_seed_config(
+        stage1_dir, profile, version, target_yaw_mode
+    )
     if os.path.exists(stage2_dir):
         entries = sorted(os.listdir(stage2_dir)) if os.path.isdir(stage2_dir) else [stage2_dir]
         if entries:
@@ -110,8 +164,10 @@ def prepare_dual_space_stage2(profile_dir, stage1_dir, stage2_dir):
     summary = {
         "profile": profile,
         "version": version,
+        "yaw_mode": target_yaw_mode,
         "mode": "stage2_adapt",
         "stage1_seed": stage1_best,
+        "stage1_config": stage1_contract["path"],
         "stage2_seed": seed_path,
         "sha256": source_hash,
         "modalities": {},

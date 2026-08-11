@@ -10,6 +10,7 @@ VALID_MODES = ("stage1_anchor", "stage2_adapt", "inference")
 VALID_CONSENSUS_MODES = ("uniform_geometry_mean", "quality_weighted")
 VALID_MULTISCALE_FUSIONS = ("concat_projection", "adaptive_gate")
 VALID_PROPOSAL_SOURCES = ("gt_jitter", "mixed")
+VALID_YAW_MODES = ("sin_cos", "sin_cos_centered")
 DEFAULT_DUAL_SPACE_DIAGNOSTICS = {
     "enabled": False,
     "match_iou_min": 0.3,
@@ -138,8 +139,12 @@ def validate_dual_space_config(config):
 
     refiner = _required_mapping(config, "refiner", "dual_space.refiner")
     _positive_int(refiner.get("hidden_dim"), "dual_space.refiner.hidden_dim")
-    if refiner.get("yaw_mode") != "sin_cos":
-        raise ValueError("dual_space.refiner.yaw_mode must be sin_cos")
+    yaw_mode = refiner.get("yaw_mode")
+    if yaw_mode not in VALID_YAW_MODES:
+        raise ValueError(
+            "invalid dual_space.refiner.yaw_mode %r; expected one of %s"
+            % (yaw_mode, VALID_YAW_MODES)
+        )
     if refiner.get("zero_init_output") is not True:
         raise ValueError("dual_space.refiner.zero_init_output must be true")
 

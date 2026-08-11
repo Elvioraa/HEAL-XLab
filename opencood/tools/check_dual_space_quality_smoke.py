@@ -165,19 +165,28 @@ def test_negligible_fourth_agent():
     assert torch.equal(first, second)
 
 
-@test("weighted sin-cos yaw consensus stays circular across pi boundary")
+@test("legacy and centered quality consensus agree across pi boundary")
 def test_yaw_circular_consensus():
-    residuals = torch.zeros(1, 2, 8)
-    angles = torch.deg2rad(torch.tensor([179.0, -179.0]))
-    residuals[0, :, 6] = torch.sin(angles)
-    residuals[0, :, 7] = torch.cos(angles)
-    fused = quality_weighted_geometry_consensus(
-        residuals,
-        torch.ones(1, 2, dtype=torch.bool),
-        torch.ones(1, 2),
+    angles = torch.deg2rad(torch.tensor([179.0, -179.0, 175.0, -175.0]))
+    quality = torch.tensor([[0.4, 0.6, 0.8, 1.0]])
+    valid = torch.ones(1, angles.shape[0], dtype=torch.bool)
+    legacy = torch.zeros(1, angles.shape[0], 8)
+    legacy[0, :, 6] = torch.sin(angles)
+    legacy[0, :, 7] = torch.cos(angles)
+    centered = legacy.clone()
+    centered[0, :, 7] -= 1.0
+    legacy_fused = quality_weighted_geometry_consensus(
+        legacy, valid, quality
     )[0]
-    fused_angle = torch.atan2(fused[0, 6], fused[0, 7]).abs()
-    assert torch.allclose(fused_angle, torch.tensor(torch.pi), atol=1e-4)
+    centered_fused = quality_weighted_geometry_consensus(
+        centered, valid, quality
+    )[0]
+    legacy_angle = torch.atan2(legacy_fused[0, 6], legacy_fused[0, 7])
+    centered_angle = torch.atan2(
+        centered_fused[0, 6], centered_fused[0, 7] + 1.0
+    )
+    assert legacy_angle.abs() > 3.0
+    assert torch.allclose(centered_angle, legacy_angle, atol=1e-6)
 
 
 @test("near-zero quality sum falls back exactly to uniform")

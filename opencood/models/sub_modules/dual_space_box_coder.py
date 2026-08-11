@@ -1,4 +1,4 @@
-"""Pure PyTorch box geometry utilities for Dual-Space HEAL DS-V1.
+"""Pure PyTorch box geometry utilities for Dual-Space HEAL DS-V1/DS-V1.1.
 
 The repository's official OPV2V HEAL configuration uses boxes in
 ``[x, y, z, h, w, l, yaw]`` order.  Yaw is measured in radians and positive
@@ -11,6 +11,9 @@ import math
 import torch
 
 
+VALID_YAW_MODES = ("sin_cos", "sin_cos_centered")
+
+
 def wrap_angle(angle):
     """Wrap a tensor of angles to ``[-pi, pi)`` without leaving PyTorch."""
     if not torch.is_tensor(angle):
@@ -18,7 +21,7 @@ def wrap_angle(angle):
     return torch.remainder(angle + math.pi, 2.0 * math.pi) - math.pi
 
 
-def encode_box_residual(proposals, targets, eps=1e-6):
+def encode_box_residual(proposals, targets, yaw_mode, eps=1e-6):
     """Encode target boxes relative to proposals as periodic 8D residuals.
 
     Parameters
@@ -26,13 +29,17 @@ def encode_box_residual(proposals, targets, eps=1e-6):
     proposals, targets : torch.Tensor
         Matching floating tensors with shape ``[..., 7]`` and fields
         ``[x, y, z, h, w, l, yaw]``.
+    yaw_mode : str
+        ``"sin_cos"`` preserves the legacy yaw target ``[sin(dyaw),
+        cos(dyaw)]``. ``"sin_cos_centered"`` uses the zero-identity target
+        ``[sin(dyaw), cos(dyaw) - 1]``.
 
     Returns
     -------
     torch.Tensor
-        ``[..., 8]`` containing ``dx, dy, dz, dlog_l, dlog_w, dlog_h,
-        sin(dyaw), cos(dyaw)``.  Translation is normalized by proposal
-        length, width, and height respectively.
+        ``[..., 8]`` containing ``dx, dy, dz, dlog_l, dlog_w, dlog_h`` and
+        the two yaw values selected by ``yaw_mode``. Translation is normalized
+        by proposal length, width, and height respectively.
     """
     _validate_boxes(proposals, "proposals")
     _validate_boxes(targets, "targets")
@@ -40,6 +47,7 @@ def encode_box_residual(proposals, targets, eps=1e-6):
         raise ValueError("proposals and targets must have identical shapes")
     if proposals.device != targets.device:
         raise ValueError("proposals and targets must be on the same device")
+    _validate_yaw_mode(yaw_mode)
     if isinstance(eps, bool) or not isinstance(eps, (int, float)) or eps <= 0:
         raise ValueError("eps must be a positive real number")
 
@@ -52,6 +60,9 @@ def encode_box_residual(proposals, targets, eps=1e-6):
     target_l = targets[..., 5].clamp_min(float(eps))
 
     dyaw = wrap_angle(targets[..., 6] - proposals[..., 6])
+    yaw_cos = torch.cos(dyaw)
+    if yaw_mode == "sin_cos_centered":
+        yaw_cos = yaw_cos - 1.0
     return torch.stack(
         (
             (targets[..., 0] - proposals[..., 0]) / proposal_l,
@@ -61,14 +72,19 @@ def encode_box_residual(proposals, targets, eps=1e-6):
             torch.log(target_w / proposal_w),
             torch.log(target_h / proposal_h),
             torch.sin(dyaw),
-            torch.cos(dyaw),
+            yaw_cos,
         ),
         dim=-1,
     )
 
 
-def decode_box_residual(proposals, residuals):
-    """Decode periodic 8D residuals into repository-format HEAL boxes."""
+def decode_box_residual(proposals, residuals, yaw_mode):
+    """Decode explicitly versioned periodic residuals into HEAL boxes.
+
+    In ``sin_cos_centered`` mode, an exact zero yaw residual preserves the
+    proposal yaw bit-for-bit instead of sending it through ``wrap_angle``.
+    Nonzero corrections retain the repository's existing wrap contract.
+    """
     _validate_boxes(proposals, "proposals")
     if not torch.is_tensor(residuals):
         raise TypeError("residuals must be a torch.Tensor")
@@ -81,12 +97,21 @@ def decode_box_residual(proposals, residuals):
         )
     if residuals.device != proposals.device:
         raise ValueError("proposals and residuals must be on the same device")
+    _validate_yaw_mode(yaw_mode)
 
     residuals = residuals.to(dtype=proposals.dtype)
     proposal_h = proposals[..., 3]
     proposal_w = proposals[..., 4]
     proposal_l = proposals[..., 5]
-    dyaw = torch.atan2(residuals[..., 6], residuals[..., 7])
+    yaw_cos = residuals[..., 7]
+    if yaw_mode == "sin_cos_centered":
+        yaw_cos = yaw_cos + 1.0
+    dyaw = torch.atan2(residuals[..., 6], yaw_cos)
+    decoded_yaw = wrap_angle(proposals[..., 6] + dyaw)
+    if yaw_mode == "sin_cos_centered":
+        zero_yaw = (residuals[..., 6] == 0) & (residuals[..., 7] == 0)
+        identity_yaw = proposals[..., 6] + residuals[..., 6]
+        decoded_yaw = torch.where(zero_yaw, identity_yaw, decoded_yaw)
     return torch.stack(
         (
             proposals[..., 0] + residuals[..., 0] * proposal_l,
@@ -95,7 +120,7 @@ def decode_box_residual(proposals, residuals):
             proposal_h * torch.exp(residuals[..., 5]),
             proposal_w * torch.exp(residuals[..., 4]),
             proposal_l * torch.exp(residuals[..., 3]),
-            wrap_angle(proposals[..., 6] + dyaw),
+            decoded_yaw,
         ),
         dim=-1,
     )
@@ -244,6 +269,14 @@ def _validate_boxes(boxes, name):
         raise ValueError("%s must contain only finite values" % name)
     if boxes.numel() and not bool((boxes[..., 3:6] > 0).all()):
         raise ValueError("%s height, width, and length must be positive" % name)
+
+
+def _validate_yaw_mode(yaw_mode):
+    if yaw_mode not in VALID_YAW_MODES:
+        raise ValueError(
+            "yaw_mode must be one of %s; got %r"
+            % (VALID_YAW_MODES, yaw_mode)
+        )
 
 
 def _validate_lwh_boxes(boxes, name):

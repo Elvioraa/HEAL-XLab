@@ -663,6 +663,7 @@ def run_dual_space_training(model, context, data_dict, detector_output=None):
         return None
     assert_dual_space_runtime_ready(model)
     mode = model.dual_space_config["mode"]
+    yaw_mode = model.dual_space_config["refiner"]["yaw_mode"]
     if mode not in ("stage1_anchor", "stage2_adapt"):
         return None
     if "object_bbx_center" not in data_dict or "object_bbx_mask" not in data_dict:
@@ -713,7 +714,9 @@ def run_dual_space_training(model, context, data_dict, detector_output=None):
                 with_jitter=bool(model.training),
             )
         result = predict_scene_residuals(model, scene, proposals)
-        target_residuals = encode_box_residual(proposals, targets)
+        target_residuals = encode_box_residual(
+            proposals, targets, yaw_mode=yaw_mode
+        )
         pair_indices = result["valid_mask"].nonzero(as_tuple=False)
         individual_targets = target_residuals.index_select(0, pair_indices[:, 0]) \
             if pair_indices.numel() else target_residuals.new_empty((0, 8))
@@ -729,7 +732,9 @@ def run_dual_space_training(model, context, data_dict, detector_output=None):
                 selected_proposals = proposals.index_select(0, pair_indices[:, 0])
                 selected_targets = targets.index_select(0, pair_indices[:, 0])
                 individual_boxes = decode_box_residual(
-                    selected_proposals, result["individual_residuals"]
+                    selected_proposals,
+                    result["individual_residuals"],
+                    yaw_mode=yaw_mode,
                 )
                 quality_targets = aligned_rotated_bev_iou_hwl(
                     individual_boxes.detach(), selected_targets.detach()
@@ -766,6 +771,7 @@ def run_dual_space_training(model, context, data_dict, detector_output=None):
 def predict_scene_residuals(model, scene, proposals):
     """Predict per-agent residuals and configured geometry consensus."""
     assert_dual_space_runtime_ready(model)
+    yaw_mode = model.dual_space_config["refiner"]["yaw_mode"]
     agent_features = scene["agent_features"]
     roi_features, detail_valid, detail_coverage = model.dual_space_object_roi(
         agent_features,
@@ -898,7 +904,9 @@ def predict_scene_residuals(model, scene, proposals):
             per_agent_residuals, valid_mask
         )
         consensus_weights = quality_fallback = None
-    decoded = decode_box_residual(proposals, fused_residuals)
+    decoded = decode_box_residual(
+        proposals, fused_residuals, yaw_mode=yaw_mode
+    )
     refined_boxes = torch.where(any_valid[:, None], decoded, proposals)
     result = {
         "proposals": proposals,

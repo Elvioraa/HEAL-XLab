@@ -1,6 +1,7 @@
 """Temporary-directory smoke tests for ``prepare_dual_space_stage2``."""
 
 import os
+import shutil
 import sys
 import tempfile
 
@@ -18,6 +19,13 @@ from opencood.tools.prepare_dual_space_stage2 import (
 
 PROFILE_DIR = os.path.join(
     REPO_ROOT, "opencood", "hypes_yaml", "HEAL_XLab_v4_DUAL_SPACE", "DS_V1"
+)
+PROFILE_V1_1_DIR = os.path.join(
+    REPO_ROOT,
+    "opencood",
+    "hypes_yaml",
+    "HEAL_XLab_v4_DUAL_SPACE",
+    "DS_V1_1",
 )
 TESTS = []
 
@@ -37,14 +45,23 @@ def write_checkpoint(directory, name, payload=b"synthetic checkpoint"):
     return path
 
 
+def write_stage1_config(directory, profile_dir=PROFILE_DIR):
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(directory, "config.yaml")
+    shutil.copy2(os.path.join(profile_dir, "stage1_m1.yaml"), path)
+    return path
+
+
 @test("Stage2 prepare creates verified independent m2/m3/m4 seeds")
 def test_success():
     with tempfile.TemporaryDirectory() as directory:
         stage1 = os.path.join(directory, "stage1")
         best = write_checkpoint(stage1, "net_epoch_bestval_at12.pth")
+        write_stage1_config(stage1)
         stage2 = os.path.join(directory, "stage2")
         summary = prepare_dual_space_stage2(PROFILE_DIR, stage1, stage2)
         assert summary["profile"] == "ds_v1"
+        assert summary["yaw_mode"] == "sin_cos"
         assert summary["sha256"] == sha256_file(best)
         assert sha256_file(os.path.join(stage2, "net_epoch1.pth")) == summary["sha256"]
         for modality in ("m2", "m3", "m4"):
@@ -87,6 +104,7 @@ def test_existing_output_guard():
     with tempfile.TemporaryDirectory() as directory:
         stage1 = os.path.join(directory, "stage1")
         write_checkpoint(stage1, "net_epoch_bestval_at8.pth")
+        write_stage1_config(stage1)
         stage2 = os.path.join(directory, "stage2")
         write_checkpoint(stage2, "train.log", b"existing experiment")
         try:
@@ -109,6 +127,7 @@ def test_copy_fallback():
     with tempfile.TemporaryDirectory() as directory:
         stage1 = os.path.join(directory, "stage1")
         best = write_checkpoint(stage1, "net_epoch_bestval_at4.pth")
+        write_stage1_config(stage1)
         stage2 = os.path.join(directory, "stage2")
         os.symlink = denied_symlink
         try:
@@ -119,6 +138,61 @@ def test_copy_fallback():
             assert item["checkpoint_method"] == "copy"
             assert not os.path.islink(item["checkpoint"])
             assert sha256_file(item["checkpoint"]) == sha256_file(best)
+
+
+@test("DS-V1.1 Stage2 rejects a legacy DS-V1 Stage1 seed")
+def test_centered_rejects_legacy_seed():
+    with tempfile.TemporaryDirectory() as directory:
+        stage1 = os.path.join(directory, "stage1")
+        write_checkpoint(stage1, "net_epoch_bestval_at6.pth")
+        write_stage1_config(stage1, PROFILE_DIR)
+        stage2 = os.path.join(directory, "stage2")
+        try:
+            prepare_dual_space_stage2(PROFILE_V1_1_DIR, stage1, stage2)
+        except ValueError as error:
+            assert "profile/version mismatch" in str(error)
+        else:
+            raise AssertionError("DS-V1.1 accepted a legacy DS-V1 Stage1 seed")
+        assert not os.path.exists(stage2)
+
+
+@test("DS-V1.1 Stage2 accepts a matching centered Stage1 seed")
+def test_centered_accepts_centered_seed():
+    with tempfile.TemporaryDirectory() as directory:
+        stage1 = os.path.join(directory, "stage1")
+        best = write_checkpoint(stage1, "net_epoch_bestval_at9.pth")
+        write_stage1_config(stage1, PROFILE_V1_1_DIR)
+        stage2 = os.path.join(directory, "stage2")
+        summary = prepare_dual_space_stage2(
+            PROFILE_V1_1_DIR, stage1, stage2
+        )
+        assert summary["profile"] == "ds_v1_1"
+        assert summary["version"] == "ds_v1_1"
+        assert summary["yaw_mode"] == "sin_cos_centered"
+        assert summary["sha256"] == sha256_file(best)
+
+
+@test("DS-V1.1 Stage2 rejects a matching profile with legacy yaw semantics")
+def test_centered_rejects_legacy_yaw_mode():
+    with tempfile.TemporaryDirectory() as directory:
+        stage1 = os.path.join(directory, "stage1")
+        write_checkpoint(stage1, "net_epoch_bestval_at10.pth")
+        config_path = write_stage1_config(stage1, PROFILE_V1_1_DIR)
+        with open(config_path, "r", encoding="utf-8") as stream:
+            content = stream.read()
+        content = content.replace(
+            "yaw_mode: sin_cos_centered", "yaw_mode: sin_cos"
+        )
+        with open(config_path, "w", encoding="utf-8") as stream:
+            stream.write(content)
+        stage2 = os.path.join(directory, "stage2")
+        try:
+            prepare_dual_space_stage2(PROFILE_V1_1_DIR, stage1, stage2)
+        except ValueError as error:
+            assert "refiner.yaw_mode mismatch" in str(error)
+        else:
+            raise AssertionError("DS-V1.1 accepted legacy yaw semantics")
+        assert not os.path.exists(stage2)
 
 
 def main():

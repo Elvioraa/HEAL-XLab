@@ -45,6 +45,17 @@ def architecture_signature(dual):
     return {key: copy.deepcopy(value) for key, value in dual.items() if key not in ignored}
 
 
+def normalized_v1_1_single_variable(config):
+    """Remove only the fields allowed to distinguish DS-V1.1 from DS-V1."""
+    result = copy.deepcopy(config)
+    result.pop("name", None)
+    dual = result["model"]["args"]["dual_space"]
+    dual.pop("version", None)
+    dual.pop("experiment_profile", None)
+    dual["refiner"].pop("yaw_mode", None)
+    return result
+
+
 def expected_stage_contract(filename):
     if filename == "stage1_m1.yaml":
         return "stage1_anchor", None, {"m1"}, True
@@ -85,7 +96,7 @@ def print_training_settings(profile, filename, config):
 def main():
     passed = 0
     expected = []
-    for profile in ("DS_V1", "DS_V2", "DS_V3"):
+    for profile in ("DS_V1", "DS_V1_1", "DS_V2", "DS_V3"):
         expected.extend((profile, name) for name in STAGED_FILES)
     expected.append(("DS_V4", "merged_infer.yaml"))
 
@@ -111,7 +122,7 @@ def main():
             }
             assert modalities == expected_modalities
             assert dual["object_encoder"]["embedding_dim"] == 128
-            if profile == "DS_V1":
+            if profile in ("DS_V1", "DS_V1_1"):
                 assert dual["multi_scale"]["enabled"] is False
                 assert dual["quality"]["enabled"] is False
             if profile in ("DS_V2", "DS_V3", "DS_V4"):
@@ -148,7 +159,7 @@ def main():
             print("[PASS] %s/%s" % (profile, filename))
 
     try:
-        for profile in ("DS_V1", "DS_V2", "DS_V3"):
+        for profile in ("DS_V1", "DS_V1_1", "DS_V2", "DS_V3"):
             reference = architecture_signature(
                 loaded[(profile, "stage1_m1.yaml")]["model"]["args"]["dual_space"]
             )
@@ -164,6 +175,7 @@ def main():
     try:
         for filename in STAGED_FILES:
             reference = normalized_non_dual(loaded[("DS_V1", filename)])
+            assert normalized_non_dual(loaded[("DS_V1_1", filename)]) == reference
             assert normalized_non_dual(loaded[("DS_V2", filename)]) == reference
             assert normalized_non_dual(loaded[("DS_V3", filename)]) == reference
         assert normalized_non_dual(
@@ -175,7 +187,24 @@ def main():
         passed += 1
         print("[PASS] non-dual settings invariant across profiles")
 
-    total = len(expected) + 2
+    try:
+        for filename in STAGED_FILES:
+            legacy = loaded[("DS_V1", filename)]
+            centered = loaded[("DS_V1_1", filename)]
+            assert normalized_v1_1_single_variable(
+                centered
+            ) == normalized_v1_1_single_variable(legacy)
+            legacy_dual = legacy["model"]["args"]["dual_space"]
+            centered_dual = centered["model"]["args"]["dual_space"]
+            assert legacy_dual["refiner"]["yaw_mode"] == "sin_cos"
+            assert centered_dual["refiner"]["yaw_mode"] == "sin_cos_centered"
+    except Exception as error:
+        print("[FAIL] DS-V1.1 single-variable invariant: %s" % error)
+    else:
+        passed += 1
+        print("[PASS] DS-V1.1 differs from DS-V1 only in experiment identity and yaw mode")
+
+    total = len(expected) + 3
     print("RESULT: %d/%d PASS" % (passed, total))
     return 0 if passed == total else 1
 

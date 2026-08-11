@@ -178,6 +178,19 @@ def test_profile_mismatch():
     )
 
 
+@test("yaw residual contract mismatch fails architecture audit")
+def test_yaw_mode_mismatch():
+    stage1_config, stage2_configs, merged_config = configs()
+    stage2_configs = copy.deepcopy(stage2_configs)
+    stage2_configs["m3"]["model"]["args"]["dual_space"]["refiner"][
+        "yaw_mode"
+    ] = "sin_cos_centered"
+    assert_rejected(
+        config_set=(stage1_config, stage2_configs, merged_config),
+        expected_text="architecture mismatch",
+    )
+
+
 @test("formal DS-V3 config derives the complete state schema")
 def test_formal_config_schema():
     path = os.path.join(
