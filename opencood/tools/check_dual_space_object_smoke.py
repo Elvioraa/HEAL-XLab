@@ -709,7 +709,7 @@ def test_inference_topk_preservation():
     refined, returned_scores = refine_dual_space_detections(
         host, corners, scores, context
     )
-    changed = torch.any(refined != corners, dim=(1, 2))
+    changed = (refined != corners).flatten(start_dim=1).any(dim=1)
     assert int(changed.sum()) == 64
     assert torch.equal(refined[:36], corners[:36])
     assert refined.shape[0] == 100
