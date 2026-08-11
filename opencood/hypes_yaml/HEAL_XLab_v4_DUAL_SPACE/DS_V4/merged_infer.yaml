@@ -356,6 +356,12 @@ model:
         dedup_iou: 0.5
         max_per_agent: 32
         max_total_added: 32
+      diagnostics:
+        enabled: false
+        match_iou_min: 0.3
+        thresholds: [0.3, 0.5, 0.7]
+        improvement_epsilon: 1.0e-4
+        save_per_object: false
       loss:
         object_loss_weight: 0.2
         individual_loss_weight: 1.0

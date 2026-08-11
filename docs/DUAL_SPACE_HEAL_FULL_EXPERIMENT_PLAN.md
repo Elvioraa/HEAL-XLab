@@ -600,12 +600,15 @@ python opencood/tools/check_dual_space_config_pack.py
 
 已完成本地验证：
 
-- 原 DS-V1 smoke: 32/32 PASS。
+- 原 DS-V1 smoke: 34/34 PASS。
 - Multi-scale smoke: 17/17 PASS；本机无 CUDA，已实现的 CUDA AMP/memory case 明确 SKIP。
 - Quality smoke: 21/21 PASS。
 - RPR smoke: 19/19 PASS。
 - mixed/config/checkpoint/merge/profile smoke: 32/32 PASS。
-- 正式 YAML repository parser pack: 17/17 PASS。
+- 正式 YAML repository parser pack: 18/18 PASS。
+- Stage2 prepare: 5/5 PASS（含 Windows symlink copy fallback）。
+- Merge audit: 7/7 PASS（含错误 source、全源 missing key、shared overwrite、profile mismatch 与正式 schema）。
+- Refinement diagnostics: 9/9 PASS；本机缺少 Shapely 的 IoU/inference/AP 集成 3 项明确 SKIP。
 - V2/V3 synthetic forward-loss-backward。
 - V3 state save/load 与 V3→V4 checkpoint reuse。
 - PACT Stage3 36/36、PACT ROI 12/12、HVP-CBEA、HVP-HEAL、gradient accumulation、AMP、merge functional regression 均通过。
@@ -621,3 +624,115 @@ python opencood/tools/check_dual_space_config_pack.py
 - full Stage2 m2/m3/m4 training。
 - merge 后真实 heterogeneous inference。
 - 最终 AP、DeltaIoU、memory 和 latency。
+
+## 35. 正式配置与运行契约
+
+三种 `dual_space.mode` 不可互换：
+
+| Mode | 职责 | 初始化/输出约束 |
+|---|---|---|
+| `stage1_anchor` | m1 建立 shared object/geometry backend | 仅 Stage1 可允许从 plain HEAL 初始化；训练 forward 使用 GT+jitter proposal |
+| `stage2_adapt` | m2/m3/m4 分别训练本模态 adapter/aligner | `active_modality` 必须是对应 mX，shared Dual-Space backend 冻结 |
+| `inference` | merged m1/m2/m3/m4 检测与 refinement | 必须加载完整 checkpoint，并返回同一次 forward 的 `dual_space_context` |
+
+正式 merged inference 配置是：
+
+```text
+opencood/hypes_yaml/HEAL_XLab_v4_DUAL_SPACE/DS_V1/merged_infer.yaml
+opencood/hypes_yaml/HEAL_XLab_v4_DUAL_SPACE/DS_V2/merged_infer.yaml
+opencood/hypes_yaml/HEAL_XLab_v4_DUAL_SPACE/DS_V3/merged_infer.yaml
+opencood/hypes_yaml/HEAL_XLab_v4_DUAL_SPACE/DS_V4/merged_infer.yaml
+```
+
+它们都显式使用 `mode: inference`、`allow_untrained_initialization: false` 和完整 m1/m2/m3/m4 结构。V1/V2/V3/V4 的 feature flags 分别保持原定义；训练 YAML 不应复制后手工改 mode 作为正式实验记录。
+
+正式训练参数以 YAML 为 source of truth：`batch_size`、`accumulate_grad_batches`、`amp`、`epoches` 应保存在实验 `config.yaml`。`--accumulation-steps`、`--amp`、`--no-amp` 仅用于兼容或临时 override，不是推荐的可复现实验记录方式。
+
+## 36. Stage2 Seed 准备
+
+固定流程为：
+
+```text
+Stage1 唯一 net_epoch_bestval_at*.pth
+  -> stage2/net_epoch1.pth
+  -> stage2/m2_alignto_m1/net_epoch1.pth
+  -> stage2/m3_alignto_m1/net_epoch1.pth
+  -> stage2/m4_alignto_m1/net_epoch1.pth
+```
+
+使用只负责目录准备、不启动训练的工具：
+
+```powershell
+python opencood/tools/prepare_dual_space_stage2.py `
+  --profile-dir opencood/hypes_yaml/HEAL_XLab_v4_DUAL_SPACE/DS_V3 `
+  --stage1-dir opencood/logs/HEAL_DUAL_SPACE/ds_v3/stage1/m1_base `
+  --stage2-dir opencood/logs/HEAL_DUAL_SPACE/ds_v3/stage2
+```
+
+工具要求 Stage1 best checkpoint 唯一，复制后校验 SHA256，预检三个 Stage2 config 的 mode、active modality、profile/version 和初始化策略。子目录 checkpoint 优先建立相对 symlink；Windows 权限不允许时显式回退为 byte-identical copy。目标目录非空或已有训练输出时直接拒绝，不隐式覆盖。
+
+## 37. Merge Ownership 与审计
+
+| Merged key group | 唯一来源 |
+|---|---|
+| m1 与 HEAL shared/base ownership | Stage1，遵循 `heal_tools.py` 的现有 merge contract |
+| `dual_space_shared_object_encoder.*` | Stage1 |
+| `dual_space_shared_geometry_encoder.*` | Stage1 |
+| `dual_space_shared_object_refiner.*` | Stage1 |
+| shared context/multiscale/quality groups | Stage1 |
+| m2 branch/aligner、object/context adapter | Stage2 m2 |
+| m3 branch/aligner、object/context adapter | Stage2 m3 |
+| m4 branch/aligner、object/context adapter | Stage2 m4 |
+
+合并完成后运行只读审计；它使用生产 `merge_dict` 与 `apply_dual_space_merge_ownership` 重建期望结果，并对 source tensor 做 exact key、shape、dtype、value 比较：
+
+```powershell
+python opencood/tools/audit_dual_space_merge.py `
+  --stage1-checkpoint <stage1-best.pth> --stage1-config <stage1-config.yaml> `
+  --stage2-m2-checkpoint <m2-best.pth> --stage2-m2-config <m2-config.yaml> `
+  --stage2-m3-checkpoint <m3-best.pth> --stage2-m3-config <m3-config.yaml> `
+  --stage2-m4-checkpoint <m4-best.pth> --stage2-m4-config <m4-config.yaml> `
+  --merged-checkpoint <merged.pth> --merged-config <merged_infer.yaml> `
+  --json-out <merge_audit.json>
+```
+
+Stage2 adapter 相对 seed 是否发生变化仅作为软诊断；ownership 错误、缺 key、profile 不一致或 merged tensor 不相等是硬失败。
+
+## 38. Refinement IoU Diagnostics
+
+Diagnostics 是 inference-only observer，默认关闭，不参与训练、loss、NMS、score、box refinement 或 checkpoint；关闭时不捕获 before/after tensor，也不新增返回字段、文件或 `state_dict` key。
+
+```yaml
+dual_space:
+  diagnostics:
+    enabled: false
+    match_iou_min: 0.3
+    thresholds: [0.3, 0.5, 0.7]
+    improvement_epsilon: 1.0e-4
+    save_per_object: false
+```
+
+启用时使用官方 AP 路径相同的 rotated BEV polygon IoU（不是 3D IoU）。先按 BEFORE IoU 从高到低做确定性 one-to-one matching，稳定 tie-break 为 proposal index、GT index；固定 pair 后计算：
+
+```text
+DeltaIoU = IoU_after - IoU_before
+cross-up@t   = before < t 且 after >= t
+cross-down@t = before >= t 且 after < t
+```
+
+JSON 包含 scene/proposal/rescued/matched counts，before/after mean IoU，mean/median DeltaIoU，positive/negative mean delta，improved/worsened/unchanged count 与 fraction，以及每个阈值的 cross-up/cross-down。普通 inference 保存 `dual_space_refinement_stats.json`；`inference_heter_in_order` 按 `use_cavN` 保存独立文件。`save_per_object: true` 时才额外写包含 scene、proposal、GT、score 和 IoU delta 的 CSV。
+
+RPR 只比较具有 BEFORE identity 的原始 proposal；rescued proposal 单独计数。当前 refinement 显式提供 source indices metadata，该 metadata 不进入模型状态。
+
+## 39. 硬件与复现边界
+
+m2、m3、m4 Stage2 可在不同型号 GPU 上独立训练。Merge 只由 checkpoint 的 `state_dict` key/value 与 ownership 决定，GPU 编号和型号不属于 checkpoint 语义；不同 GPU kernel、CUDA/cuDNN 版本和算法选择仍可能造成数值级复现差异，因此每个实验必须保留实际 config、checkpoint hash 和运行环境记录。
+
+新增工程检查入口：
+
+```text
+python opencood/tools/check_dual_space_config_pack.py
+python opencood/tools/check_prepare_dual_space_stage2_smoke.py
+python opencood/tools/check_dual_space_merge_audit_smoke.py
+python opencood/tools/check_dual_space_diagnostics_smoke.py
+```

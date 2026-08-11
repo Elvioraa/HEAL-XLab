@@ -15,6 +15,9 @@ import opencood.hypes_yaml.yaml_utils as yaml_utils
 from opencood.tools import train_utils, inference_utils
 from opencood.data_utils.datasets import build_dataset
 from opencood.utils import eval_utils
+from opencood.utils.dual_space_refinement_diagnostics import (
+    DualSpaceRefinementDiagnostics,
+)
 from opencood.visualization import vis_utils, my_vis, simple_vis
 from opencood.utils.common_utils import update_dict
 torch.multiprocessing.set_sharing_strategy('file_system')
@@ -102,6 +105,7 @@ def main():
     if torch.cuda.is_available():
         model.cuda()
     model.eval()
+    dual_space_diagnostics = DualSpaceRefinementDiagnostics.from_model(model)
 
     # setting noise
     np.random.seed(303)
@@ -164,6 +168,7 @@ def main():
                 raise NotImplementedError('Only single, no, no_w_uncertainty, early, late and intermediate'
                                         'fusion is supported.')
 
+            dual_space_diagnostics.update_inference_result(infer_result, i)
             pred_box_tensor = infer_result['pred_box_tensor']
             gt_box_tensor = infer_result['gt_box_tensor']
             pred_score = infer_result['pred_score']
@@ -226,6 +231,7 @@ def main():
                                     left_hand=left_hand)
         torch.cuda.empty_cache()
 
+    dual_space_diagnostics.save(opt.model_dir)
     _, ap50, ap70 = eval_utils.eval_final_results(result_stat,
                                 opt.model_dir, infer_info)
 

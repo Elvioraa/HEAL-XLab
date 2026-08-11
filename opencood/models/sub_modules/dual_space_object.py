@@ -1080,16 +1080,19 @@ def refine_dual_space_detections(model, pred_box_tensor, pred_score, context):
     scene = context["scenes"][0]
     rescue_enabled = model.dual_space_flags["remote_proposal_rescue"]
     report_stats = model.dual_space_flags["report_stats"]
+    diagnostics_enabled = model.dual_space_flags.get("diagnostics", False)
     if (pred_box_tensor is None) != (pred_score is None):
         raise ValueError(
             "prediction boxes and scores must either both be tensors or both be None"
         )
     if pred_box_tensor is None or pred_score is None:
         if not rescue_enabled:
+            _record_refinement_identity(context, diagnostics_enabled, 0, 0)
             return pred_box_tensor, pred_score
         remote_boxes = scene.get("remote_proposals")
         remote_scores = scene.get("remote_scores")
         if not remote_boxes:
+            _record_refinement_identity(context, diagnostics_enabled, 0, 0)
             return pred_box_tensor, pred_score
         reference_box = remote_boxes[0]
         reference_score = remote_scores[0]
@@ -1134,6 +1137,7 @@ def refine_dual_space_detections(model, pred_box_tensor, pred_score, context):
             ]
 
     if center_boxes.shape[0] == 0:
+        _record_refinement_identity(context, diagnostics_enabled, 0, 0)
         if report_stats:
             context["dual_space_stats"] = runtime_stats
         if not rescue_enabled:
@@ -1204,9 +1208,25 @@ def refine_dual_space_detections(model, pred_box_tensor, pred_score, context):
                 }
             )
         context["dual_space_stats"] = runtime_stats
+    _record_refinement_identity(
+        context, diagnostics_enabled, original_fused_count, int(output_boxes.shape[0])
+    )
     # Scores are intentionally unchanged; Dual-Space only modifies geometry
     # and RPR appends the source remote score for newly rescued candidates.
     return output_boxes, pred_score
+
+
+def _record_refinement_identity(context, enabled, original_count, output_count):
+    """Expose inference-only source indices without changing tensor ordering."""
+    if not enabled:
+        return
+    if output_count < original_count:
+        raise RuntimeError("Dual-Space refinement dropped an original proposal")
+    context["dual_space_refinement_metadata"] = {
+        "original_after_indices": tuple(range(original_count)),
+        "rescued_proposal_count": output_count - original_count,
+        "original_order_preserved": True,
+    }
 
 
 def validate_dual_space_checkpoint_keys(model, checkpoint_keys):

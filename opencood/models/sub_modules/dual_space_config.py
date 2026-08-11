@@ -4,10 +4,19 @@ Experiment profiles are labels only. Runtime behavior is controlled solely by
 explicit feature switches and modes inside ``model.args.dual_space``.
 """
 
+import math
+
 VALID_MODES = ("stage1_anchor", "stage2_adapt", "inference")
 VALID_CONSENSUS_MODES = ("uniform_geometry_mean", "quality_weighted")
 VALID_MULTISCALE_FUSIONS = ("concat_projection", "adaptive_gate")
 VALID_PROPOSAL_SOURCES = ("gt_jitter", "mixed")
+DEFAULT_DUAL_SPACE_DIAGNOSTICS = {
+    "enabled": False,
+    "match_iou_min": 0.3,
+    "thresholds": (0.3, 0.5, 0.7),
+    "improvement_epsilon": 1.0e-4,
+    "save_per_object": False,
+}
 
 
 def validate_dual_space_config(config):
@@ -26,6 +35,7 @@ def validate_dual_space_config(config):
     multi = _optional_mapping(config, "multi_scale")
     quality = _optional_mapping(config, "quality")
     rescue = _optional_mapping(config, "remote_proposal_rescue")
+    diagnostics = _optional_mapping(config, "diagnostics")
     multi_enabled = _optional_bool(
         multi, "enabled", False, "dual_space.multi_scale.enabled"
     )
@@ -36,6 +46,9 @@ def validate_dual_space_config(config):
         rescue, "enabled", False,
         "dual_space.remote_proposal_rescue.enabled",
     )
+    diagnostics_enabled = _optional_bool(
+        diagnostics, "enabled", False, "dual_space.diagnostics.enabled"
+    )
 
     if not enabled:
         active = []
@@ -45,6 +58,8 @@ def validate_dual_space_config(config):
             active.append("quality.enabled")
         if rescue_enabled:
             active.append("remote_proposal_rescue.enabled")
+        if diagnostics_enabled:
+            active.append("diagnostics.enabled")
         fusion = multi.get("fusion")
         if fusion == "adaptive_gate":
             active.append("multi_scale.fusion=adaptive_gate")
@@ -86,6 +101,7 @@ def validate_dual_space_config(config):
         raise ValueError(
             "dual_space.active_modality is only valid for stage2_adapt"
         )
+    _validate_diagnostics(diagnostics, mode)
 
     roi = _required_mapping(config, "roi", "dual_space.roi")
     for key in (
@@ -327,6 +343,7 @@ def dual_space_feature_flags(config):
             "remote_proposal_rescue": False,
             "mixed_proposals": False,
             "report_stats": False,
+            "diagnostics": False,
         }
     return {
         "enabled": True,
@@ -337,7 +354,72 @@ def dual_space_feature_flags(config):
         ),
         "mixed_proposals": config["training_proposals"]["source"] == "mixed",
         "report_stats": bool(config.get("report_stats", False)),
+        "diagnostics": bool(
+            config.get("diagnostics", {}).get("enabled", False)
+        ),
     }
+
+
+def resolve_dual_space_diagnostics(config):
+    """Return the complete observer config without mutating the input mapping."""
+    resolved = dict(DEFAULT_DUAL_SPACE_DIAGNOSTICS)
+    resolved["thresholds"] = list(DEFAULT_DUAL_SPACE_DIAGNOSTICS["thresholds"])
+    if config is None:
+        return resolved
+    diagnostics = config.get("diagnostics", {})
+    if not isinstance(diagnostics, dict):
+        raise TypeError("dual_space.diagnostics must be a mapping")
+    resolved.update(diagnostics)
+    resolved["thresholds"] = list(resolved["thresholds"])
+    return resolved
+
+
+def _validate_diagnostics(diagnostics, mode):
+    enabled = _optional_bool(
+        diagnostics, "enabled", False, "dual_space.diagnostics.enabled"
+    )
+    if enabled and mode != "inference":
+        raise ValueError(
+            "dual_space.diagnostics is inference-only; expected mode=inference"
+        )
+    match_iou_min = diagnostics.get(
+        "match_iou_min", DEFAULT_DUAL_SPACE_DIAGNOSTICS["match_iou_min"]
+    )
+    _unit_interval(
+        match_iou_min, "dual_space.diagnostics.match_iou_min", allow_zero=True
+    )
+    thresholds = diagnostics.get(
+        "thresholds", DEFAULT_DUAL_SPACE_DIAGNOSTICS["thresholds"]
+    )
+    if not isinstance(thresholds, (list, tuple)) or not thresholds:
+        raise ValueError(
+            "dual_space.diagnostics.thresholds must be a non-empty sequence"
+        )
+    normalized = []
+    for index, threshold in enumerate(thresholds):
+        normalized.append(
+            _unit_interval(
+                threshold,
+                "dual_space.diagnostics.thresholds[%d]" % index,
+                allow_zero=True,
+            )
+        )
+    if len(set(normalized)) != len(normalized):
+        raise ValueError("dual_space.diagnostics.thresholds must be unique")
+    if normalized != sorted(normalized):
+        raise ValueError("dual_space.diagnostics.thresholds must be sorted")
+    _nonnegative_real(
+        diagnostics.get(
+            "improvement_epsilon",
+            DEFAULT_DUAL_SPACE_DIAGNOSTICS["improvement_epsilon"],
+        ),
+        "dual_space.diagnostics.improvement_epsilon",
+    )
+    save_per_object = diagnostics.get(
+        "save_per_object", DEFAULT_DUAL_SPACE_DIAGNOSTICS["save_per_object"]
+    )
+    if type(save_per_object) is not bool:
+        raise TypeError("dual_space.diagnostics.save_per_object must be bool")
 
 
 def _required_mapping(config, key, name):
@@ -395,6 +477,8 @@ def _positive_real(value, name):
 def _nonnegative_real(value, name):
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise TypeError("%s must be a real number" % name)
+    if not math.isfinite(float(value)):
+        raise ValueError("%s must be finite" % name)
     if float(value) < 0.0:
         raise ValueError("%s must be non-negative" % name)
     return float(value)

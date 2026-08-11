@@ -146,6 +146,7 @@ def inference_early_fusion(batch_data, model, dataset):
                              output_dict)
 
     ego_output = output_dict['ego']
+    refinement_observation = None
     if getattr(model, "dual_space_enabled", False):
         if "dual_space_context" not in ego_output:
             raise RuntimeError(
@@ -155,12 +156,37 @@ def inference_early_fusion(batch_data, model, dataset):
             refine_dual_space_detections,
         )
 
+        diagnostics_enabled = model.dual_space_flags.get("diagnostics", False)
+        pred_box_before_ds = (
+            pred_box_tensor.detach().clone()
+            if diagnostics_enabled and pred_box_tensor is not None
+            else None
+        )
+        pred_score_before_ds = (
+            pred_score.detach().clone()
+            if diagnostics_enabled and pred_score is not None
+            else None
+        )
         pred_box_tensor, pred_score = refine_dual_space_detections(
             model,
             pred_box_tensor,
             pred_score,
             ego_output["dual_space_context"],
         )
+        if diagnostics_enabled:
+            from opencood.utils.dual_space_refinement_diagnostics import (
+                make_refinement_observation,
+            )
+
+            refinement_observation = make_refinement_observation(
+                pred_box_before_ds,
+                pred_score_before_ds,
+                pred_box_tensor,
+                pred_score,
+                ego_output["dual_space_context"].get(
+                    "dual_space_refinement_metadata", {}
+                ),
+            )
     if (
         getattr(model, "open_dcsi_enabled", False)
         and "open_dcsi" in ego_output
@@ -195,6 +221,10 @@ def inference_early_fusion(batch_data, model, dataset):
     return_dict = {"pred_box_tensor" : pred_box_tensor, \
                     "pred_score" : pred_score, \
                     "gt_box_tensor" : gt_box_tensor}
+    if refinement_observation is not None:
+        from opencood.utils.dual_space_refinement_diagnostics import OBSERVATION_KEY
+
+        return_dict[OBSERVATION_KEY] = refinement_observation
     if (
         getattr(model, "dual_space_enabled", False)
         and model.dual_space_flags["report_stats"]

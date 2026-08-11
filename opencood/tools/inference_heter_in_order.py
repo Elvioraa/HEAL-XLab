@@ -27,6 +27,9 @@ import opencood.hypes_yaml.yaml_utils as yaml_utils
 from opencood.tools import train_utils, inference_utils
 from opencood.data_utils.datasets import build_dataset
 from opencood.utils import eval_utils
+from opencood.utils.dual_space_refinement_diagnostics import (
+    DualSpaceRefinementDiagnostics,
+)
 from opencood.visualization import vis_utils, my_vis, simple_vis
 from opencood.utils.common_utils import update_dict
 from opencood.xlab.hooks import apply_xlab_postprocess_hook
@@ -160,6 +163,7 @@ def main():
         use_cav_and_lidar_config_pair = [(x, lidar_dict0) for x in eval(opt.use_cav)]
 
     for (use_cav, lidar_config) in use_cav_and_lidar_config_pair:
+        dual_space_diagnostics = DualSpaceRefinementDiagnostics.from_model(model)
         hypes['use_cav'] = use_cav
         if lidar_config is not None:
             hypes['heter']['lidar_channels_dict'] = lidar_config
@@ -245,6 +249,7 @@ def main():
                 pred_box_tensor = infer_result['pred_box_tensor']
                 gt_box_tensor = infer_result['gt_box_tensor']
                 pred_score = infer_result['pred_score']
+                dual_space_diagnostics.update_inference_result(infer_result, i)
 
                 pred_box_tensor, pred_score, gt_box_tensor = apply_xlab_postprocess_hook(
                     pred_box_tensor=pred_box_tensor,
@@ -307,6 +312,12 @@ def main():
                                         left_hand=left_hand)
             torch.cuda.empty_cache()
 
+        diagnostics_suffix = "use_cav%d" % use_cav
+        if opt.lidar_degrade:
+            diagnostics_suffix += "_m1_%s_m3_%s" % (
+                lidar_config["m1"], lidar_config["m3"]
+            )
+        dual_space_diagnostics.save(opt.model_dir, suffix=diagnostics_suffix)
         _, ap50, ap70 = eval_utils.eval_final_results(result_stat,
                                     opt.model_dir, infer_info)
 
