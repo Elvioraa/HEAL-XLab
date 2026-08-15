@@ -30,6 +30,7 @@ from opencood.utils import eval_utils
 from opencood.utils.dual_space_refinement_diagnostics import (
     DualSpaceRefinementDiagnostics,
 )
+from opencood.utils.dual_space_quality_diagnostics import DualSpaceQualityDiagnostics
 from opencood.visualization import vis_utils, my_vis, simple_vis
 from opencood.utils.common_utils import update_dict
 from opencood.xlab.hooks import apply_xlab_postprocess_hook
@@ -164,6 +165,13 @@ def main():
 
     for (use_cav, lidar_config) in use_cav_and_lidar_config_pair:
         dual_space_diagnostics = DualSpaceRefinementDiagnostics.from_model(model)
+        dual_space_quality_diagnostics = None
+        if (
+            getattr(model, "dual_space_enabled", False)
+            and model.dual_space_flags.get("diagnostics", False)
+            and model.dual_space_flags.get("quality", False)
+        ):
+            dual_space_quality_diagnostics = DualSpaceQualityDiagnostics.from_model(model)
         hypes['use_cav'] = use_cav
         if lidar_config is not None:
             hypes['heter']['lidar_channels_dict'] = lidar_config
@@ -250,6 +258,8 @@ def main():
                 gt_box_tensor = infer_result['gt_box_tensor']
                 pred_score = infer_result['pred_score']
                 dual_space_diagnostics.update_inference_result(infer_result, i)
+                if dual_space_quality_diagnostics is not None:
+                    dual_space_quality_diagnostics.update_inference_result(infer_result, i)
 
                 pred_box_tensor, pred_score, gt_box_tensor = apply_xlab_postprocess_hook(
                     pred_box_tensor=pred_box_tensor,
@@ -318,6 +328,8 @@ def main():
                 lidar_config["m1"], lidar_config["m3"]
             )
         dual_space_diagnostics.save(opt.model_dir, suffix=diagnostics_suffix)
+        if dual_space_quality_diagnostics is not None:
+            dual_space_quality_diagnostics.save(opt.model_dir, suffix=diagnostics_suffix)
         _, ap50, ap70 = eval_utils.eval_final_results(result_stat,
                                     opt.model_dir, infer_info)
 

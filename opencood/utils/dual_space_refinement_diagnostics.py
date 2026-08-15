@@ -72,17 +72,21 @@ def make_refinement_observation(
     pred_box_after_ds,
     pred_score_after_ds,
     metadata,
+    quality_gt_boxes=None,
 ):
     """Clone and detach one inference scene without altering prediction outputs."""
     if not isinstance(metadata, dict):
         raise TypeError("Dual-Space refinement metadata must be a mapping")
-    return {
+    observation = {
         "pred_box_before_ds": _clone_optional(pred_box_before_ds),
         "pred_score_before_ds": _clone_optional(pred_score_before_ds),
         "pred_box_after_ds": _clone_optional(pred_box_after_ds),
         "pred_score_after_ds": _clone_optional(pred_score_after_ds),
         "metadata": dict(metadata),
     }
+    if quality_gt_boxes is not None:
+        observation["quality_gt_boxes"] = _clone_optional(quality_gt_boxes)
+    return observation
 
 
 class DualSpaceRefinementDiagnostics(object):

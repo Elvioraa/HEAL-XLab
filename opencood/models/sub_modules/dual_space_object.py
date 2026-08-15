@@ -1157,6 +1157,25 @@ def refine_dual_space_detections(model, pred_box_tensor, pred_score, context):
     top_indices = torch.topk(pred_score, k=refine_count, sorted=False).indices
     selected = center_boxes.index_select(0, top_indices).detach()
     result = predict_scene_residuals(model, scene, selected)
+    if diagnostics_enabled and model.dual_space_flags["quality"]:
+        # Metadata is inference-only: retain the exact tensors used by the
+        # existing consensus, detached but otherwise unmodified.
+        context["dual_space_refinement_metadata"] = {
+            "selected_proposals": selected.detach(),
+            "top_indices": top_indices.detach(),
+            "valid_mask": result["valid_mask"].detach(),
+            "per_agent_residuals": result["per_agent_residuals"].detach(),
+            "per_agent_quality": result["per_agent_quality"].detach(),
+            "consensus_weights": (
+                result["consensus_weights"].detach()
+                if result["consensus_weights"] is not None else None
+            ),
+            "quality_fallback": (
+                result["quality_fallback"].detach()
+                if result["quality_fallback"] is not None else None
+            ),
+            "agent_modalities": tuple(scene["agent_modalities"]),
+        }
     selected_refined = torch.where(
         result["any_valid"][:, None], result["refined_boxes"], selected
     )
@@ -1230,11 +1249,15 @@ def _record_refinement_identity(context, enabled, original_count, output_count):
         return
     if output_count < original_count:
         raise RuntimeError("Dual-Space refinement dropped an original proposal")
-    context["dual_space_refinement_metadata"] = {
+    metadata = context.get("dual_space_refinement_metadata", {})
+    if not isinstance(metadata, dict):
+        raise TypeError("dual_space refinement metadata must be a mapping")
+    metadata.update({
         "original_after_indices": tuple(range(original_count)),
         "rescued_proposal_count": output_count - original_count,
         "original_order_preserved": True,
-    }
+    })
+    context["dual_space_refinement_metadata"] = metadata
 
 
 def validate_dual_space_checkpoint_keys(model, checkpoint_keys):

@@ -157,6 +157,9 @@ def inference_early_fusion(batch_data, model, dataset):
         )
 
         diagnostics_enabled = model.dual_space_flags.get("diagnostics", False)
+        quality_diagnostics_enabled = (
+            diagnostics_enabled and model.dual_space_flags.get("quality", False)
+        )
         pred_box_before_ds = (
             pred_box_tensor.detach().clone()
             if diagnostics_enabled and pred_box_tensor is not None
@@ -185,6 +188,10 @@ def inference_early_fusion(batch_data, model, dataset):
                 pred_score,
                 ego_output["dual_space_context"].get(
                     "dual_space_refinement_metadata", {}
+                ),
+                quality_gt_boxes=(
+                    _dual_space_quality_gt_boxes(batch_data)
+                    if quality_diagnostics_enabled else None
                 ),
             )
     if (
@@ -235,6 +242,28 @@ def inference_early_fusion(batch_data, model, dataset):
     if "depth_items" in output_dict['ego']:
         return_dict.update({"depth_items" : output_dict['ego']['depth_items']})
     return return_dict
+
+
+def _dual_space_quality_gt_boxes(batch_data):
+    """Return valid ego 7D GT boxes for inference-only quality diagnostics."""
+    ego = batch_data.get("ego") if isinstance(batch_data, dict) else None
+    if not isinstance(ego, dict):
+        raise TypeError("quality diagnostics requires batch_data['ego'] mapping")
+    boxes = ego.get("object_bbx_center")
+    mask = ego.get("object_bbx_mask")
+    if not torch.is_tensor(boxes) or not torch.is_tensor(mask):
+        raise KeyError(
+            "quality diagnostics requires ego object_bbx_center and object_bbx_mask"
+        )
+    if boxes.ndim == 3:
+        if boxes.shape[0] != 1 or mask.ndim != 2 or mask.shape[0] != 1:
+            raise ValueError("quality diagnostics supports one inference scene per batch")
+        boxes, mask = boxes[0], mask[0]
+    if boxes.ndim != 2 or boxes.shape[1] != 7 or mask.ndim != 1:
+        raise ValueError("quality GT must have shapes [N,7] and [N]")
+    if boxes.shape[0] != mask.shape[0]:
+        raise ValueError("quality GT box and mask counts must match")
+    return boxes[mask.to(dtype=torch.bool)].detach()
 
 
 def inference_intermediate_fusion(batch_data, model, dataset):
