@@ -18,6 +18,9 @@ from opencood.utils import eval_utils
 from opencood.utils.dual_space_refinement_diagnostics import (
     DualSpaceRefinementDiagnostics,
 )
+from opencood.models.sub_modules.dual_space_config import (
+    prepare_dual_space_inference_config,
+)
 from opencood.visualization import vis_utils, my_vis, simple_vis
 from opencood.utils.common_utils import update_dict
 torch.multiprocessing.set_sharing_strategy('file_system')
@@ -74,6 +77,8 @@ def main():
             if name == hypes["yaml_parser"]:
                 parser_func = func
         hypes = parser_func(hypes)
+
+    hypes = prepare_dual_space_inference_config(hypes)
 
         
     

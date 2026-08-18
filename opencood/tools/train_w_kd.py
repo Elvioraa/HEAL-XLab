@@ -3,6 +3,7 @@
 # License: TDG-Attribution-NonCommercial-NoDistrib
 
 import argparse
+import gc
 import os
 import statistics
 
@@ -13,6 +14,10 @@ from tensorboardX import SummaryWriter
 import importlib
 import opencood.hypes_yaml.yaml_utils as yaml_utils
 from opencood.tools import train_utils
+from opencood.tools.post_train_inference import (
+    execute_post_train_inference,
+    prepare_post_train_inference,
+)
 from opencood.data_utils.datasets import build_dataset
 
 from icecream import ic
@@ -202,14 +207,27 @@ def main():
                                     'net_epoch%d.pth' % (epoch + 1)))
         scheduler.step(epoch)
 
-    print('Training Finished, checkpoints saved to %s' % saved_path)
-    torch.cuda.empty_cache()
-    run_test = True
-    if run_test:
-        fusion_method = opt.fusion_method
-        cmd = f"python /GPFS/rhome/yifanlu/workspace/OpenCOODv2/opencood/tools/inference.py --model_dir {saved_path} --fusion_method {fusion_method}"
-        print(f"Running command: {cmd}")
-        os.system(cmd)
+    print('[Training] Finished successfully; checkpoints saved to %s' % saved_path)
+    post_train_plan = prepare_post_train_inference(
+        model, saved_path, opt.fusion_method
+    )
+    writer.close()
+    print('[PostTrainInference] Releasing training resources...')
+    del model, optimizer, criterion, scheduler
+    if kd_flag:
+        del teacher_model
+    if 'batch_data' in locals():
+        del batch_data
+    if 'ouput_dict' in locals():
+        del ouput_dict
+    if 'teacher_output_dict' in locals():
+        del teacher_output_dict
+    if 'final_loss' in locals():
+        del final_loss
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    execute_post_train_inference(post_train_plan)
 
 if __name__ == '__main__':
     main()

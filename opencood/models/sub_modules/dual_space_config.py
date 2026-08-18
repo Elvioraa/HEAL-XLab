@@ -4,6 +4,7 @@ Experiment profiles are labels only. Runtime behavior is controlled solely by
 explicit feature switches and modes inside ``model.args.dual_space``.
 """
 
+import copy
 import math
 
 VALID_MODES = ("stage1_anchor", "stage2_adapt", "inference")
@@ -18,6 +19,40 @@ DEFAULT_DUAL_SPACE_DIAGNOSTICS = {
     "improvement_epsilon": 1.0e-4,
     "save_per_object": False,
 }
+
+
+def prepare_dual_space_inference_config(hypes):
+    """Return inference-ready runtime hypes without mutating training config.
+
+    Dual-Space Stage1 and Stage2 directories intentionally retain their
+    training modes on disk. The inference entry point calls this function
+    before model construction so both module trainability and checkpoint
+    validation are derived from ``mode=inference``. Plain HEAL, explicitly
+    disabled Dual-Space, and already-inference configurations are returned
+    unchanged.
+    """
+    if not isinstance(hypes, dict):
+        raise TypeError("hypes must be a mapping")
+    model = hypes.get("model")
+    if not isinstance(model, dict):
+        return hypes
+    args = model.get("args")
+    if not isinstance(args, dict):
+        return hypes
+    config = args.get("dual_space")
+    if config is None:
+        return hypes
+    validate_dual_space_config(config)
+    if config.get("enabled") is not True or config["mode"] == "inference":
+        return hypes
+
+    runtime_hypes = copy.deepcopy(hypes)
+    runtime_config = runtime_hypes["model"]["args"]["dual_space"]
+    runtime_config["mode"] = "inference"
+    runtime_config["allow_untrained_initialization"] = False
+    runtime_config.pop("active_modality", None)
+    validate_dual_space_config(runtime_config)
+    return runtime_hypes
 
 
 def validate_dual_space_config(config):

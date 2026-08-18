@@ -1,4 +1,5 @@
 import argparse
+import gc
 import os
 import statistics
 import glob
@@ -10,6 +11,10 @@ import opencood.hypes_yaml.yaml_utils as yaml_utils
 from opencood.tools import train_utils
 from opencood.data_utils.datasets import build_dataset
 from opencood.tools import multi_gpu_utils
+from opencood.tools.post_train_inference import (
+    execute_post_train_inference,
+    prepare_post_train_inference,
+)
 from icecream import ic
 import tqdm
 
@@ -240,11 +245,25 @@ def main():
         
         opencood_train_dataset.reinitialize()
 
-    print('Training Finished, checkpoints saved to %s' % saved_path)
+    distributed_active = (
+        torch.distributed.is_available() and torch.distributed.is_initialized()
+    )
+    if distributed_active:
+        torch.distributed.barrier()
+        if opt.rank == 0:
+            print('[Distributed] Final barrier complete')
 
     if opt.rank == 0:
-        run_test = True
-        
+        print('[Training] Finished successfully; checkpoints saved to %s' % saved_path)
+
+    post_train_plan = prepare_post_train_inference(
+        model_without_ddp,
+        saved_path,
+        opt.fusion_method,
+        rank=opt.rank,
+    )
+
+    if opt.rank == 0:
         # ddp training may leave multiple bestval
         bestval_model_list = glob.glob(os.path.join(saved_path, "net_epoch_bestval_at*"))
         
@@ -256,11 +275,30 @@ def main():
                 if idx != (len(bestval_model_list) - 1):
                     os.remove(bestval_model_list[idx])
 
-        if run_test:
-            fusion_method = opt.fusion_method
-            cmd = f"python opencood/tools/inference.py --model_dir {saved_path} --fusion_method {fusion_method}"
-            print(f"Running command: {cmd}")
-            os.system(cmd)
+    if distributed_active:
+        torch.distributed.barrier()
+        torch.distributed.destroy_process_group()
+        if opt.rank == 0:
+            print('[Distributed] Process group destroyed')
+
+    writer.close()
+    if opt.rank == 0:
+        print('[PostTrainInference] Releasing training resources...')
+    del model, model_without_ddp, optimizer, criterion, scheduler
+    if opt.half:
+        del scaler
+    if 'batch_data' in locals():
+        del batch_data
+    if 'ouput_dict' in locals():
+        del ouput_dict
+    if 'final_loss' in locals():
+        del final_loss
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    if opt.rank == 0:
+        execute_post_train_inference(post_train_plan)
 
 
 if __name__ == '__main__':
