@@ -24,6 +24,7 @@ from opencood.models.sub_modules.dual_space_box_coder import (
 )
 from opencood.models.sub_modules.dual_space_config import (
     dual_space_feature_flags,
+    resolve_dual_space_ablation,
     resolve_dual_space_diagnostics,
     resolve_v5_quality_safe_config,
     resolve_v6_residual_safe_config,
@@ -276,6 +277,7 @@ def install_dual_space_modules(model, args):
 
     model.dual_space_config = config
     model.dual_space_flags = dual_space_feature_flags(config)
+    model.dual_space_ablation_config = resolve_dual_space_ablation(config)
     if model.dual_space_flags["diagnostics"]:
         model.dual_space_diagnostics_config = resolve_dual_space_diagnostics(
             config
@@ -942,9 +944,15 @@ def predict_scene_residuals(model, scene, proposals):
             dtype=object_embedding.dtype,
         )
         geometry_embedding = model.dual_space_shared_geometry_encoder(raw_geometry)
-        individual_residuals = model.dual_space_shared_object_refiner(
-            object_embedding, geometry_embedding
-        )
+        refiner_enabled = model.dual_space_ablation_config["refiner"]["enabled"]
+        if refiner_enabled:
+            individual_residuals = model.dual_space_shared_object_refiner(
+                object_embedding, geometry_embedding
+            )
+        else:
+            individual_residuals = object_embedding.new_zeros(
+                (object_embedding.shape[0], 8)
+            )
         per_agent_residuals = individual_residuals.new_zeros(
             (proposal_count, agent_count, 8)
         ).index_put(
@@ -982,12 +990,19 @@ def predict_scene_residuals(model, scene, proposals):
                 (proposal_count, agent_count)
             )
 
-    bypass_quality = _inference_ablation_enabled(
+    diagnostic_bypass_quality = _inference_ablation_enabled(
         model, "bypass_quality_weighting"
+    )
+    quality_fusion_enabled = model.dual_space_ablation_config[
+        "quality_fusion"
+    ]["enabled"]
+    quality_weighting_bypassed = bool(
+        model.dual_space_config["consensus"]["mode"] == "quality_weighted"
+        and (not quality_fusion_enabled or diagnostic_bypass_quality)
     )
     if (
         model.dual_space_config["consensus"]["mode"] == "quality_weighted"
-        and not bypass_quality
+        and not quality_weighting_bypassed
     ):
         quality_config = model.dual_space_config["quality"]
         fused_residuals, any_valid, consensus_weights, quality_fallback = (
@@ -1005,7 +1020,7 @@ def predict_scene_residuals(model, scene, proposals):
         fused_residuals, any_valid = uniform_geometry_consensus(
             per_agent_residuals, valid_mask
         )
-        if bypass_quality and model.dual_space_flags["quality"]:
+        if quality_weighting_bypassed and model.dual_space_flags["quality"]:
             valid_weights = valid_mask.to(dtype=per_agent_residuals.dtype)
             consensus_weights = valid_weights / valid_weights.sum(
                 dim=1, keepdim=True
@@ -1013,10 +1028,13 @@ def predict_scene_residuals(model, scene, proposals):
             quality_fallback = any_valid.clone()
         else:
             consensus_weights = quality_fallback = None
-    decoded = decode_box_residual(
-        proposals, fused_residuals, yaw_mode=yaw_mode
-    )
-    refined_boxes = torch.where(any_valid[:, None], decoded, proposals)
+    if model.dual_space_ablation_config["refiner"]["enabled"]:
+        decoded = decode_box_residual(
+            proposals, fused_residuals, yaw_mode=yaw_mode
+        )
+        refined_boxes = torch.where(any_valid[:, None], decoded, proposals)
+    else:
+        refined_boxes = proposals
     result = {
         "proposals": proposals,
         "individual_residuals": individual_residuals,
@@ -1044,8 +1062,10 @@ def predict_scene_residuals(model, scene, proposals):
                 "quality_fallback": quality_fallback,
             }
         )
-        if bypass_quality:
+        if quality_weighting_bypassed:
             result["quality_weighting_bypassed"] = True
+    if not model.dual_space_ablation_config["refiner"]["enabled"]:
+        result["refiner_bypassed"] = True
     return result
 
 
@@ -1350,10 +1370,13 @@ def refine_dual_space_detections(model, pred_box_tensor, pred_score, context):
             ),
             "agent_modalities": tuple(scene["agent_modalities"]),
         }
-    selected_refined = torch.where(
-        result["any_valid"][:, None], result["refined_boxes"], selected
-    )
-    refined_corners = boxes_hwl_to_corners_3d(selected_refined)
+    refiner_enabled = model.dual_space_ablation_config["refiner"]["enabled"]
+    refined_corners = None
+    if refiner_enabled:
+        selected_refined = torch.where(
+            result["any_valid"][:, None], result["refined_boxes"], selected
+        )
+        refined_corners = boxes_hwl_to_corners_3d(selected_refined)
 
     if rescue_enabled:
         rescued_corners = boxes_hwl_to_corners_3d(
@@ -1366,11 +1389,13 @@ def refine_dual_space_detections(model, pred_box_tensor, pred_score, context):
         )
     else:
         output_boxes = pred_box_tensor.clone()
-    valid_top_indices = top_indices[result["any_valid"]]
-    if valid_top_indices.numel():
+    valid_top_indices = top_indices[result["any_valid"]] if refiner_enabled else None
+    if valid_top_indices is not None and valid_top_indices.numel():
         output_boxes[valid_top_indices] = refined_corners[result["any_valid"]]
     if report_stats:
-        refined_count = int(result["any_valid"].sum().item())
+        refined_count = (
+            int(result["any_valid"].sum().item()) if refiner_enabled else 0
+        )
         valid_pair_count = int(result["valid_mask"].sum().item())
         runtime_stats.update(
             {

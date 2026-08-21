@@ -28,6 +28,7 @@ def make_dual_config(
     diagnostics=None,
     v5_quality_safe=None,
     v6_residual_safe=None,
+    ablation=None,
 ):
     """Return one complete explicit synthetic Dual-Space configuration."""
     if rescue:
@@ -133,6 +134,8 @@ def make_dual_config(
         config["v5_quality_safe"] = copy.deepcopy(v5_quality_safe)
     if v6_residual_safe is not None:
         config["v6_residual_safe"] = copy.deepcopy(v6_residual_safe)
+    if ablation is not None:
+        config["ablation"] = copy.deepcopy(ablation)
     return config
 
 
@@ -159,6 +162,7 @@ class TinyDualSpaceHost(nn.Module):
         diagnostics=None,
         v5_quality_safe=None,
         v6_residual_safe=None,
+        ablation=None,
     ):
         super().__init__()
         self.modality_name_list = list(modalities)
@@ -190,6 +194,7 @@ class TinyDualSpaceHost(nn.Module):
                 diagnostics=diagnostics,
                 v5_quality_safe=v5_quality_safe,
                 v6_residual_safe=v6_residual_safe,
+                ablation=ablation,
             ),
         }
         for name in modalities:

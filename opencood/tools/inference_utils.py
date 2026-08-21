@@ -15,6 +15,11 @@ from opencood.utils.box_utils import create_bbx, project_box3d, nms_rotated
 from opencood.utils.camera_utils import indices_to_depth
 from sklearn.metrics import mean_squared_error
 
+from opencood.models.sub_modules.dual_space_config import (
+    dual_space_ablation_log_lines,
+)
+
+
 def inference_late_fusion(batch_data, model, dataset):
     """
     Model inference for late fusion.
@@ -418,3 +423,9 @@ def get_cav_box(batch_data):
 
 
     return cav_box_np, agent_modality_list
+
+
+def print_dual_space_ablation(model):
+    """Print the resolved inference ablation contract once at startup."""
+    for line in dual_space_ablation_log_lines(model):
+        print(line)

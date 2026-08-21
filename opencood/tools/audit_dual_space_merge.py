@@ -308,7 +308,8 @@ def _architecture_signature(dual):
     ignored = {
         "version", "experiment_profile", "mode", "active_modality",
         "allow_untrained_initialization", "remote_proposal_rescue",
-        "diagnostics", "v5_quality_safe", "v6_residual_safe", "report_stats",
+        "diagnostics", "v5_quality_safe", "v6_residual_safe", "ablation",
+        "report_stats",
     }
     return {key: value for key, value in dual.items() if key not in ignored}
 

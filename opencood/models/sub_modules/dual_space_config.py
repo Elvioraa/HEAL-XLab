@@ -78,6 +78,10 @@ DEFAULT_V6_RESIDUAL_SAFE = {
         "eps": 1.0e-6,
     },
 }
+DEFAULT_DUAL_SPACE_ABLATION = {
+    "quality_fusion": {"enabled": True},
+    "refiner": {"enabled": True},
+}
 
 
 def prepare_dual_space_inference_config(hypes):
@@ -133,6 +137,7 @@ def validate_dual_space_config(config):
     diagnostics = _optional_mapping(config, "diagnostics")
     v5_quality_safe = _optional_mapping(config, "v5_quality_safe")
     v6_residual_safe = _optional_mapping(config, "v6_residual_safe")
+    ablation = _optional_mapping(config, "ablation")
     multi_enabled = _optional_bool(
         multi, "enabled", False, "dual_space.multi_scale.enabled"
     )
@@ -311,6 +316,7 @@ def validate_dual_space_config(config):
     _validate_diagnostics(diagnostics, mode, quality_enabled)
     _validate_v5_quality_safe(v5_quality_safe, quality_enabled)
     _validate_v6_residual_safe(v6_residual_safe)
+    _validate_dual_space_ablation(ablation, mode)
 
     consensus = _required_mapping(
         config, "consensus", "dual_space.consensus"
@@ -522,6 +528,29 @@ def resolve_v6_residual_safe_config(config):
     return resolved
 
 
+def resolve_dual_space_ablation(config):
+    """Return inference component switches with legacy-preserving defaults."""
+    resolved = copy.deepcopy(DEFAULT_DUAL_SPACE_ABLATION)
+    if config is not None:
+        value = config.get("ablation", {})
+        if not isinstance(value, dict):
+            raise TypeError("dual_space.ablation must be a mapping")
+        _merge_nested_defaults(resolved, value)
+    return resolved
+
+
+def dual_space_ablation_log_lines(model):
+    """Return the stable startup log for a resolved Dual-Space model."""
+    if not getattr(model, "dual_space_enabled", False):
+        return ()
+    config = model.dual_space_ablation_config
+    return (
+        "[DualSpace Ablation]",
+        "quality_fusion = %s" % config["quality_fusion"]["enabled"],
+        "refiner = %s" % config["refiner"]["enabled"],
+    )
+
+
 def _validate_diagnostics(diagnostics, mode, quality_enabled):
     enabled = _optional_bool(
         diagnostics, "enabled", False, "dual_space.diagnostics.enabled"
@@ -640,6 +669,31 @@ def _validate_diagnostics(diagnostics, mode, quality_enabled):
     if enabled and ablation_enabled and mode != "inference":
         raise ValueError(
             "diagnostic inference ablation requires dual_space.mode=inference"
+        )
+
+
+def _validate_dual_space_ablation(config, mode):
+    quality_fusion = config.get("quality_fusion", {})
+    refiner = config.get("refiner", {})
+    if not isinstance(quality_fusion, dict):
+        raise TypeError("dual_space.ablation.quality_fusion must be a mapping")
+    if not isinstance(refiner, dict):
+        raise TypeError("dual_space.ablation.refiner must be a mapping")
+    quality_enabled = _optional_bool(
+        quality_fusion,
+        "enabled",
+        True,
+        "dual_space.ablation.quality_fusion.enabled",
+    )
+    refiner_enabled = _optional_bool(
+        refiner,
+        "enabled",
+        True,
+        "dual_space.ablation.refiner.enabled",
+    )
+    if mode != "inference" and (not quality_enabled or not refiner_enabled):
+        raise ValueError(
+            "dual_space.ablation may disable components only in inference mode"
         )
 
 

@@ -134,6 +134,7 @@ def main():
     if torch.cuda.is_available():
         model.cuda()
     model.eval()
+    inference_utils.print_dual_space_ablation(model)
 
     # setting noise
     np.random.seed(303)

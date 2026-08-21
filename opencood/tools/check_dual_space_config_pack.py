@@ -40,7 +40,7 @@ def architecture_signature(dual):
     ignored = {
         "version", "experiment_profile", "mode", "active_modality",
         "allow_untrained_initialization", "remote_proposal_rescue",
-        "diagnostics", "report_stats",
+        "diagnostics", "ablation", "report_stats",
     }
     return {key: copy.deepcopy(value) for key, value in dual.items() if key not in ignored}
 
