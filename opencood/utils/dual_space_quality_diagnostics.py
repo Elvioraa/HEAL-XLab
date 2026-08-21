@@ -34,7 +34,11 @@ class DualSpaceQualityDiagnostics(object):
     def __init__(self, dual_space_config=None):
         self.config = resolve_dual_space_diagnostics(dual_space_config)
         quality = (dual_space_config or {}).get("quality", {})
-        self.enabled = bool(self.config["enabled"] and quality.get("enabled", False))
+        self.enabled = bool(
+            self.config["enabled"]
+            and self.config["quality_target"]["enabled"]
+            and quality.get("enabled", False)
+        )
         self.yaw_mode = (dual_space_config or {}).get("refiner", {}).get("yaw_mode")
         self._pairs = []
         self._proposals = []

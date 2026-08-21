@@ -33,7 +33,10 @@ def test(name):
 
 def quality_host():
     host = TinyDualSpaceHost(mode="inference", quality=True)
-    host.dual_space_config["diagnostics"] = {"enabled": True}
+    host.dual_space_config["diagnostics"] = {
+        "enabled": True,
+        "quality_target": {"enabled": True},
+    }
     host.dual_space_flags["diagnostics"] = True
     return host
 
@@ -71,6 +74,17 @@ def test_disabled_is_noop():
     assert torch.equal(output_scores, scores)
     assert output.shape == boxes.shape
     assert "dual_space_refinement_metadata" not in context
+
+
+@test("quality-target child disabled creates no quality diagnostic output")
+def test_quality_target_child_gate():
+    host = TinyDualSpaceHost(mode="inference", quality=True)
+    host.dual_space_config["diagnostics"] = {"enabled": True}
+    collector = DualSpaceQualityDiagnostics.from_model(host)
+    assert collector.enabled is False
+    with tempfile.TemporaryDirectory() as directory:
+        assert collector.save(directory) is None
+        assert os.listdir(directory) == []
 
 
 @test("enabled real quality diagnostics expose detached metadata without changing outputs")
@@ -221,6 +235,7 @@ def test_inference_collector_gate():
     needle = "and model.dual_space_flags.get(\"diagnostics\", False)"
     assert needle in source
     assert "and model.dual_space_flags.get(\"quality\", False)" in source
+    assert 'model.dual_space_diagnostics_config["quality_target"]' in source
 
 
 def main():

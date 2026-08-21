@@ -18,6 +18,12 @@ from opencood.tools.post_train_inference import (
     execute_post_train_inference,
     prepare_post_train_inference,
 )
+from opencood.models.sub_modules.dual_space_diagnostics import (
+    attach_dual_space_training_diagnostics,
+    close_dual_space_training_diagnostics,
+    maybe_record_loss_gradient_contributions,
+    maybe_record_total_gradients,
+)
 from opencood.data_utils.datasets import build_dataset
 
 from icecream import ic
@@ -95,6 +101,7 @@ def main():
 
     # record training
     writer = SummaryWriter(saved_path)
+    attach_dual_space_training_diagnostics(model, saved_path)
 
     print('Training start')
     epoches = hypes['train_params']['epoches']
@@ -158,7 +165,12 @@ def main():
                 criterion.logging(epoch, i, len(train_loader), writer, suffix="_single")
 
             # back-propagation
+            diagnostic_step = epoch * len(train_loader) + i
+            maybe_record_loss_gradient_contributions(
+                model, ouput_dict, diagnostic_step
+            )
             final_loss.backward()
+            maybe_record_total_gradients(model, diagnostic_step)
             optimizer.step()
 
             torch.cuda.empty_cache()
@@ -211,6 +223,7 @@ def main():
     post_train_plan = prepare_post_train_inference(
         model, saved_path, opt.fusion_method
     )
+    close_dual_space_training_diagnostics(model)
     writer.close()
     print('[PostTrainInference] Releasing training resources...')
     del model, optimizer, criterion, scheduler

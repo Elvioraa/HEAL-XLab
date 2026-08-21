@@ -225,6 +225,27 @@ class PointPillarPyramidLoss(PointPillarDepthLoss):
         dual_space_mean_quality_target = self.loss_dict.get(
             'dual_space_mean_quality_target', 0
         )
+        dual_space_v5_present = (
+            'dual_space_v5_valid_quality_count' in self.loss_dict
+        )
+        dual_space_v5_valid_count = self.loss_dict.get(
+            'dual_space_v5_valid_quality_count', 0
+        )
+        dual_space_v5_weighted_quality = self.loss_dict.get(
+            'dual_space_v5_weighted_quality_loss', 0
+        )
+        dual_space_v5_scale = self.loss_dict.get(
+            'dual_space_v5_quality_scale', 1
+        )
+        dual_space_v5_ratio = self.loss_dict.get(
+            'dual_space_v5_quality_to_detection_ratio', 0
+        )
+        dual_space_v5_ranking = self.loss_dict.get(
+            'dual_space_v5_ranking_loss', 0
+        )
+        dual_space_v5_pairs = self.loss_dict.get(
+            'dual_space_v5_ranking_pair_count', 0
+        )
 
         log_msg = ("[epoch %d][%d/%d]%s || Loss: %.4f || Conf Loss: %.4f"
                    " || Loc Loss: %.4f || Dir Loss: %.4f || IoU Loss: %.4f"
@@ -283,6 +304,19 @@ class PointPillarPyramidLoss(PointPillarDepthLoss):
                     dual_space_quality_loss,
                     dual_space_mean_quality,
                     dual_space_mean_quality_target,
+                )
+            if dual_space_v5_present:
+                log_msg += (
+                    " || DS V5 Valid: %d || DS V5 Weighted q: %.3e"
+                    " || DS V5 Scale: %.3f || DS V5 q/det: %.3f"
+                    " || DS V5 Rank: %.3e (%d pairs)"
+                ) % (
+                    dual_space_v5_valid_count,
+                    dual_space_v5_weighted_quality,
+                    dual_space_v5_scale,
+                    dual_space_v5_ratio,
+                    dual_space_v5_ranking,
+                    dual_space_v5_pairs,
                 )
         print(log_msg)
 
@@ -360,4 +394,16 @@ class PointPillarPyramidLoss(PointPillarDepthLoss):
                     writer.add_scalar('DualSpace_mean_quality_target' + suffix,
                                       dual_space_mean_quality_target,
                                       epoch*batch_len + batch_id)
+                if dual_space_v5_present:
+                    for name, value in (
+                        ('DualSpace_v5_valid_quality_count', dual_space_v5_valid_count),
+                        ('DualSpace_v5_weighted_quality_loss', dual_space_v5_weighted_quality),
+                        ('DualSpace_v5_quality_scale', dual_space_v5_scale),
+                        ('DualSpace_v5_quality_to_detection_ratio', dual_space_v5_ratio),
+                        ('DualSpace_v5_ranking_loss', dual_space_v5_ranking),
+                        ('DualSpace_v5_ranking_pair_count', dual_space_v5_pairs),
+                    ):
+                        writer.add_scalar(
+                            name + suffix, value, epoch*batch_len + batch_id
+                        )
 

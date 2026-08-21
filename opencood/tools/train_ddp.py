@@ -15,6 +15,12 @@ from opencood.tools.post_train_inference import (
     execute_post_train_inference,
     prepare_post_train_inference,
 )
+from opencood.models.sub_modules.dual_space_diagnostics import (
+    attach_dual_space_training_diagnostics,
+    close_dual_space_training_diagnostics,
+    maybe_record_loss_gradient_contributions,
+    maybe_record_total_gradients,
+)
 from icecream import ic
 import tqdm
 
@@ -125,6 +131,9 @@ def main():
 
     # record training
     writer = SummaryWriter(saved_path)
+    attach_dual_space_training_diagnostics(
+        model_without_ddp, saved_path, rank=opt.rank
+    )
 
     # half precision training
     if opt.half:
@@ -183,14 +192,22 @@ def main():
                 criterion.logging(epoch, i, len(train_loader), writer, suffix="_single")
 
             step_now = (i + 1) % accum_steps == 0
+            diagnostic_step = epoch * len(train_loader) + i
+            maybe_record_loss_gradient_contributions(
+                model, ouput_dict, diagnostic_step
+            )
             if not opt.half:
                 (final_loss / accum_steps).backward()
+                maybe_record_total_gradients(model, diagnostic_step)
                 if step_now:
                     optimizer.step()
                     model.zero_grad()
                     optimizer.zero_grad()
             else:
                 scaler.scale(final_loss / accum_steps).backward()
+                maybe_record_total_gradients(
+                    model, diagnostic_step, grad_scale=scaler.get_scale()
+                )
                 if step_now:
                     scaler.step(optimizer)
                     scaler.update()
@@ -281,6 +298,7 @@ def main():
         if opt.rank == 0:
             print('[Distributed] Process group destroyed')
 
+    close_dual_space_training_diagnostics(model_without_ddp)
     writer.close()
     if opt.rank == 0:
         print('[PostTrainInference] Releasing training resources...')

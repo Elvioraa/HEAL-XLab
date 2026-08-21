@@ -170,6 +170,9 @@ def main():
             getattr(model, "dual_space_enabled", False)
             and model.dual_space_flags.get("diagnostics", False)
             and model.dual_space_flags.get("quality", False)
+            and model.dual_space_diagnostics_config["quality_target"][
+                "enabled"
+            ]
         ):
             dual_space_quality_diagnostics = DualSpaceQualityDiagnostics.from_model(model)
         hypes['use_cav'] = use_cav

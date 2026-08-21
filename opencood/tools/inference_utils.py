@@ -158,7 +158,11 @@ def inference_early_fusion(batch_data, model, dataset):
 
         diagnostics_enabled = model.dual_space_flags.get("diagnostics", False)
         quality_diagnostics_enabled = (
-            diagnostics_enabled and model.dual_space_flags.get("quality", False)
+            diagnostics_enabled
+            and model.dual_space_flags.get("quality", False)
+            and model.dual_space_diagnostics_config["quality_target"][
+                "enabled"
+            ]
         )
         pred_box_before_ds = (
             pred_box_tensor.detach().clone()

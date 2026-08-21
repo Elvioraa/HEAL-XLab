@@ -142,10 +142,29 @@ def main():
                 assert dual["diagnostics"]["enabled"] is False
                 assert diagnostics == {
                     "enabled": False,
+                    "every_n_steps": 100,
+                    "max_records": 2000,
                     "match_iou_min": 0.3,
                     "thresholds": [0.3, 0.5, 0.7],
                     "improvement_epsilon": 1.0e-4,
                     "save_per_object": False,
+                    "quality_target": {
+                        "enabled": False,
+                        "max_records": 500,
+                        "dump_jsonl": True,
+                    },
+                    "adapter_residual": {"enabled": False},
+                    "gradient_flow": {
+                        "enabled": False,
+                        "every_n_steps": 200,
+                    },
+                    "merge_ownership": {"enabled": False},
+                    "inference_ablation": {
+                        "enabled": False,
+                        "bypass_object_adapter": False,
+                        "bypass_context_adapter": False,
+                        "bypass_quality_weighting": False,
+                    },
                 }
             print_training_settings(profile, filename, config)
             loaded[(profile, filename)] = config

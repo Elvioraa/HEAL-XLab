@@ -9,6 +9,19 @@ from collections import OrderedDict
 import glob
 import re
 
+from opencood.hypes_yaml.yaml_utils import load_yaml
+from opencood.models.sub_modules.dual_space_config import (
+    resolve_v5_quality_safe_config,
+    resolve_v6_residual_safe_config,
+)
+
+
+class DualSpaceMergeConfigError(RuntimeError):
+    """Raised before merge_final writes a checkpoint with incompatible configs."""
+
+
+_MERGE_MODALITIES = ('m2', 'm3', 'm4')
+
 def get_model_path_from_dir(model_dir):
     def findLastCheckpoint(save_dir):
         file_list = glob.glob(os.path.join(save_dir, '*epoch*.pth'))
@@ -237,6 +250,10 @@ def merge_and_save_final(aligned_model_dir_list, output_model_dir):
     output_model_dir:
         model_dir.
     """
+    validate_dual_space_merge_config_contract(
+        aligned_model_dir_list, output_model_dir
+    )
+
     final_dict = OrderedDict()
     ordered_stage_dicts = []
     for aligned_model_dir in aligned_model_dir_list:
@@ -251,6 +268,156 @@ def merge_and_save_final(aligned_model_dir_list, output_model_dir):
 
     output_model_path = os.path.join(output_model_dir, 'net_epoch1.pth')
     torch.save(final_dict, output_model_path)
+
+
+def validate_dual_space_merge_config_contract(
+    aligned_model_dir_list, output_model_dir
+):
+    """Validate parameter-free extension configs before ``merge_final``.
+
+    The official merge order starts with Stage2 m2, m3, and m4. Legacy runs
+    with missing or disabled V5/V6 extensions return without requiring a final
+    config. V5 is training-only and is compared across Stage2. V6 changes the
+    inference forward and must also match the explicitly supplied final config.
+    """
+    if len(aligned_model_dir_list) < len(_MERGE_MODALITIES):
+        return {'v5_quality_safe': False, 'v6_residual_safe': False}
+
+    stage2_configs = {}
+    stage2_paths = {}
+    for modality, model_dir in zip(
+        _MERGE_MODALITIES, aligned_model_dir_list[:3]
+    ):
+        path = os.path.join(model_dir, 'config.yaml')
+        stage2_paths[modality] = path
+        stage2_configs[modality] = _load_optional_merge_config(path, modality)
+
+    v5_configs = {
+        modality: _resolve_merge_extension(
+            config, resolve_v5_quality_safe_config, modality, 'V5'
+        )
+        for modality, config in stage2_configs.items()
+    }
+    v6_configs = {
+        modality: _resolve_merge_extension(
+            config, resolve_v6_residual_safe_config, modality, 'V6'
+        )
+        for modality, config in stage2_configs.items()
+    }
+    v5_enabled = any(config['enabled'] for config in v5_configs.values())
+    v6_enabled = any(config['enabled'] for config in v6_configs.values())
+    if not v5_enabled and not v6_enabled:
+        return {'v5_quality_safe': False, 'v6_residual_safe': False}
+
+    for modality, config in stage2_configs.items():
+        if config is None:
+            raise DualSpaceMergeConfigError(
+                '[DualSpace Merge Config Error]\n'
+                'Stage2/%s config.yaml is required because a Dual-Space '
+                'merge extension is enabled: %s' % (
+                    modality, stage2_paths[modality]
+                )
+            )
+
+    if v5_enabled:
+        _require_stage2_extension_match(v5_configs, 'V5 quality-safe')
+
+    if v6_enabled:
+        canonical_v6 = _require_stage2_extension_match(
+            v6_configs, 'V6 residual-safe'
+        )
+        final_path = os.path.join(output_model_dir, 'config.yaml')
+        final_config = _load_required_final_config(final_path)
+        final_v6 = _resolve_merge_extension(
+            final_config,
+            resolve_v6_residual_safe_config,
+            'final_infer',
+            'V6',
+        )
+        if not final_v6['enabled']:
+            raise DualSpaceMergeConfigError(
+                '[DualSpace Merge Config Error]\n'
+                'V6 residual-safe is enabled in Stage2 but disabled in final '
+                'inference config.\nUse the matching merged_infer.yaml before '
+                'running merge_final.'
+            )
+        if final_v6 != canonical_v6:
+            raise DualSpaceMergeConfigError(
+                '[DualSpace Merge Config Error]\n'
+                'V6 configuration mismatch between stage2/m2 and final_infer.'
+            )
+        print(
+            '[DualSpace Merge Config]\n'
+            'V6 residual-safe contract validated for stage2 -> merged inference'
+        )
+
+    return {
+        'v5_quality_safe': v5_enabled,
+        'v6_residual_safe': v6_enabled,
+    }
+
+
+def _load_optional_merge_config(path, label):
+    if not os.path.isfile(path):
+        return None
+    try:
+        return load_yaml(path, None)
+    except Exception as error:
+        raise DualSpaceMergeConfigError(
+            '[DualSpace Merge Config Error]\n'
+            'Could not read Stage2/%s config: %s' % (label, error)
+        ) from error
+
+
+def _load_required_final_config(path):
+    if not os.path.isfile(path):
+        raise DualSpaceMergeConfigError(
+            '[DualSpace Merge Config Error]\n'
+            'V6 residual-safe is enabled in Stage2 but final inference '
+            'config.yaml is missing: %s\nUse the matching merged_infer.yaml '
+            'before running merge_final.' % path
+        )
+    try:
+        return load_yaml(path, None)
+    except Exception as error:
+        raise DualSpaceMergeConfigError(
+            '[DualSpace Merge Config Error]\n'
+            'Could not read final inference config: %s' % error
+        ) from error
+
+
+def _resolve_merge_extension(config, resolver, label, extension):
+    dual_space = None
+    if isinstance(config, dict):
+        model = config.get('model')
+        args = model.get('args') if isinstance(model, dict) else None
+        if isinstance(args, dict):
+            dual_space = args.get('dual_space')
+    if dual_space is not None and not isinstance(dual_space, dict):
+        raise DualSpaceMergeConfigError(
+            '[DualSpace Merge Config Error]\n'
+            '%s model.args.dual_space must be a mapping' % label
+        )
+    try:
+        return resolver(dual_space)
+    except Exception as error:
+        raise DualSpaceMergeConfigError(
+            '[DualSpace Merge Config Error]\n'
+            '%s %s configuration is invalid: %s'
+            % (label, extension, error)
+        ) from error
+
+
+def _require_stage2_extension_match(configs, label):
+    canonical = configs['m2']
+    for modality in _MERGE_MODALITIES[1:]:
+        if configs[modality] != canonical:
+            raise DualSpaceMergeConfigError(
+                '[DualSpace Merge Config Error]\n'
+                '%s configuration mismatch between stage2/m2 and stage2/%s.'
+                % (label, modality)
+            )
+    return canonical
 
 
 if __name__ == "__main__":

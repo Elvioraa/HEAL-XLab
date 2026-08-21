@@ -115,6 +115,36 @@ def assert_rejected(
         raise AssertionError("merge audit accepted an injected ownership defect")
 
 
+def with_v6_configs():
+    """Return synthetic configs with one shared parameter-free V6 contract."""
+    stage1_config, stage2_configs, merged_config = configs()
+    v6 = {
+        "enabled": True,
+        "object": {
+            "enabled": True,
+            "mode": "norm_cap",
+            "max_residual_ratio": 0.25,
+            "residual_scale": 1.0,
+            "eps": 1.0e-6,
+        },
+        "context": {
+            "enabled": True,
+            "mode": "norm_cap",
+            "max_residual_ratio": 0.25,
+            "residual_scale": 1.0,
+            "eps": 1.0e-6,
+        },
+    }
+    for config in stage2_configs.values():
+        config["model"]["args"]["dual_space"]["v6_residual_safe"] = (
+            copy.deepcopy(v6)
+        )
+    merged_config["model"]["args"]["dual_space"]["v6_residual_safe"] = (
+        copy.deepcopy(v6)
+    )
+    return stage1_config, stage2_configs, merged_config
+
+
 @test("correct synthetic ownership passes")
 def test_correct():
     report = run_audit()
@@ -188,6 +218,24 @@ def test_yaw_mode_mismatch():
     assert_rejected(
         config_set=(stage1_config, stage2_configs, merged_config),
         expected_text="architecture mismatch",
+    )
+
+
+@test("matching Stage2 and merged V6 settings pass")
+def test_v6_config_preserved():
+    report = run_audit(config_set=with_v6_configs())
+    assert report["status"] == "PASS"
+
+
+@test("merged inference cannot lose the Stage2 V6 contract")
+def test_v6_config_mismatch():
+    stage1_config, stage2_configs, merged_config = with_v6_configs()
+    merged_config["model"]["args"]["dual_space"]["v6_residual_safe"][
+        "context"
+    ]["residual_scale"] = 0.5
+    assert_rejected(
+        config_set=(stage1_config, stage2_configs, merged_config),
+        expected_text="lost Stage2 m2 V6 residual-safe settings",
     )
 
 

@@ -17,6 +17,7 @@ if REPO_ROOT not in sys.path:
 
 from opencood.hypes_yaml.yaml_utils import load_yaml
 from opencood.models.sub_modules.dual_space_config import (
+    resolve_v6_residual_safe_config,
     validate_dual_space_config,
 )
 from opencood.models.sub_modules.dual_space_object import (
@@ -289,6 +290,13 @@ def _validate_config_contracts(
         raise DualSpaceMergeAuditError("merged inference profile mismatch")
     if _architecture_signature(merged_dual) != source_signature:
         raise DualSpaceMergeAuditError("merged inference architecture mismatch")
+    merged_v6 = resolve_v6_residual_safe_config(merged_dual)
+    for modality in MODALITIES:
+        if resolve_v6_residual_safe_config(stage2_dual[modality]) != merged_v6:
+            raise DualSpaceMergeAuditError(
+                "merged inference lost Stage2 %s V6 residual-safe settings"
+                % modality
+            )
     merged_modalities = {
         key for key in merged_config["model"]["args"] if key in ("m1", "m2", "m3", "m4")
     }
@@ -300,7 +308,7 @@ def _architecture_signature(dual):
     ignored = {
         "version", "experiment_profile", "mode", "active_modality",
         "allow_untrained_initialization", "remote_proposal_rescue",
-        "diagnostics", "report_stats",
+        "diagnostics", "v5_quality_safe", "v6_residual_safe", "report_stats",
     }
     return {key: value for key, value in dual.items() if key not in ignored}
 

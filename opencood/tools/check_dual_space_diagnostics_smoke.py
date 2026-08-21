@@ -202,7 +202,7 @@ def test_disabled_noop():
         assert os.listdir(directory) == []
 
 
-@test("legacy config defaults diagnostics off and training mode rejects it")
+@test("legacy diagnostics stay off while training observers are explicit")
 def test_diagnostics_config_contract():
     legacy = make_dual_config(mode="inference")
     validate_dual_space_config(legacy)
@@ -211,12 +211,17 @@ def test_diagnostics_config_contract():
 
     training = make_dual_config(mode="stage1_anchor")
     training["diagnostics"] = diagnostics_config(True)["diagnostics"]
+    validate_dual_space_config(training)
+    training["diagnostics"]["inference_ablation"] = {
+        "enabled": True,
+        "bypass_object_adapter": True,
+    }
     try:
         validate_dual_space_config(training)
     except ValueError as error:
-        assert "inference-only" in str(error)
+        assert "mode=inference" in str(error)
     else:
-        raise AssertionError("training config enabled inference-only diagnostics")
+        raise AssertionError("training config enabled an inference-only bypass")
 
     for invalid in (float("nan"), float("inf")):
         invalid_config = make_dual_config(mode="inference")

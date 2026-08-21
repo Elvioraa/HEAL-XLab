@@ -125,10 +125,18 @@ class DualSpaceTrainingProposalSampler(nn.Module):
         with_jitter=True,
         predicted_boxes=None,
         predicted_scores=None,
+        return_metadata=False,
     ):
-        """Return ``(proposals, targets)`` in ``[x,y,z,h,w,l,yaw]`` order."""
+        """Return assigned proposals/targets and optional matching metadata.
+
+        ``return_metadata=False`` preserves the original two-value contract.
+        When enabled, the third value carries the already-established GT index
+        and validity for each proposal; it never performs a second match.
+        """
         if type(with_jitter) is not bool:
             raise TypeError("with_jitter must be bool")
+        if type(return_metadata) is not bool:
+            raise TypeError("return_metadata must be bool")
         if not torch.is_tensor(gt_boxes) or gt_boxes.ndim != 2 or gt_boxes.shape[1] != 7:
             raise ValueError("gt_boxes must have shape [M,7] in hwl order")
         if not torch.is_floating_point(gt_boxes):
@@ -137,7 +145,12 @@ class DualSpaceTrainingProposalSampler(nn.Module):
             raise ValueError("gt_mask must have shape [M]")
         if gt_mask.shape[0] != gt_boxes.shape[0] or gt_mask.device != gt_boxes.device:
             raise ValueError("gt_mask must match gt_boxes on length and device")
-        valid_gt = gt_boxes[gt_mask.to(dtype=torch.bool)]
+        bool_mask = gt_mask.to(dtype=torch.bool)
+        valid_gt = gt_boxes[bool_mask]
+        valid_gt_indices = (
+            bool_mask.nonzero(as_tuple=False).flatten()
+            if return_metadata else None
+        )
         if valid_gt.numel() == 0:
             empty = gt_boxes.new_empty((0, 7))
             self.last_stats = {
@@ -146,6 +159,15 @@ class DualSpaceTrainingProposalSampler(nn.Module):
                 "predicted_positive_count": 0,
                 "proposal_count": 0,
             }
+            if return_metadata:
+                return empty.detach(), empty.detach(), {
+                    "matched_gt_indices": torch.empty(
+                        0, dtype=torch.long, device=gt_boxes.device
+                    ),
+                    "matched_valid": torch.empty(
+                        0, dtype=torch.bool, device=gt_boxes.device
+                    ),
+                }
             return empty.detach(), empty.detach()
         if not bool((valid_gt[:, 3:6] > 0).all()):
             raise ValueError("valid GT height, width, and length must be positive")
@@ -154,9 +176,12 @@ class DualSpaceTrainingProposalSampler(nn.Module):
 
         proposal_parts = []
         target_parts = []
+        matched_index_parts = []
         if self.include_gt:
             proposal_parts.append(valid_gt.clone())
             target_parts.append(valid_gt)
+            if return_metadata:
+                matched_index_parts.append(valid_gt_indices)
         jitter_count = self.jitters_per_gt if with_jitter else 0
         for _ in range(jitter_count):
             jittered = valid_gt.clone()
@@ -170,6 +195,8 @@ class DualSpaceTrainingProposalSampler(nn.Module):
             )
             proposal_parts.append(jittered)
             target_parts.append(valid_gt)
+            if return_metadata:
+                matched_index_parts.append(valid_gt_indices)
 
         base_count = sum(int(part.shape[0]) for part in proposal_parts)
         predicted_input_count = 0
@@ -200,6 +227,10 @@ class DualSpaceTrainingProposalSampler(nn.Module):
                 if boxes.shape[0]:
                     proposal_parts.append(boxes)
                     target_parts.append(valid_gt.index_select(0, matched_indices))
+                    if return_metadata:
+                        matched_index_parts.append(
+                            valid_gt_indices.index_select(0, matched_indices)
+                        )
 
         if proposal_parts:
             proposals = torch.cat(proposal_parts, dim=0)[:self.max_proposals]
@@ -214,6 +245,18 @@ class DualSpaceTrainingProposalSampler(nn.Module):
             "proposal_count": int(proposals.shape[0]),
         }
         # Proposal geometry is a sampling decision and must not receive object loss.
+        if return_metadata:
+            matched_gt_indices = (
+                torch.cat(matched_index_parts, dim=0)[:self.max_proposals]
+                if matched_index_parts
+                else torch.empty(0, dtype=torch.long, device=gt_boxes.device)
+            )
+            return proposals.detach(), targets.detach(), {
+                "matched_gt_indices": matched_gt_indices.detach(),
+                "matched_valid": torch.ones(
+                    proposals.shape[0], dtype=torch.bool, device=gt_boxes.device
+                ),
+            }
         return proposals.detach(), targets.detach()
 
 

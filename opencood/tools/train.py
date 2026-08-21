@@ -21,6 +21,12 @@ from opencood.tools.post_train_inference import (
     execute_post_train_inference,
     prepare_post_train_inference,
 )
+from opencood.models.sub_modules.dual_space_diagnostics import (
+    attach_dual_space_training_diagnostics,
+    close_dual_space_training_diagnostics,
+    maybe_record_loss_gradient_contributions,
+    maybe_record_total_gradients,
+)
 
 
 def train_parser(argv=None):
@@ -128,6 +134,7 @@ def main():
         
     # record training
     writer = SummaryWriter(saved_path)
+    attach_dual_space_training_diagnostics(model, saved_path)
 
     print('Training start')
     epoches = hypes['train_params']['epoches']
@@ -185,7 +192,17 @@ def main():
                     final_loss = final_loss + criterion(ouput_dict, batch_data['ego']['label_dict_single'], suffix="_single") * hypes['train_params'].get("single_weight", 1)
                 criterion.logging(epoch, i, len(train_loader), writer, suffix="_single")
 
-            if accumulator.backward(final_loss, scaler):
+            diagnostic_step = epoch * len(train_loader) + i
+            maybe_record_loss_gradient_contributions(
+                model, ouput_dict, diagnostic_step
+            )
+            should_step = accumulator.backward(final_loss, scaler)
+            maybe_record_total_gradients(
+                model,
+                diagnostic_step,
+                grad_scale=scaler.get_scale() if scaler.is_enabled() else 1.0,
+            )
+            if should_step:
                 accumulator.step(optimizer, scaler)
 
             # torch.cuda.empty_cache()  # it will destroy memory buffer
@@ -254,6 +271,7 @@ def main():
     post_train_plan = prepare_post_train_inference(
         model, saved_path, opt.fusion_method
     )
+    close_dual_space_training_diagnostics(model)
     writer.close()
     print('[PostTrainInference] Releasing training resources...')
     del model, optimizer, criterion, scheduler, scaler, accumulator

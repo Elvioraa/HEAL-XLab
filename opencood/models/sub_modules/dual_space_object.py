@@ -24,7 +24,16 @@ from opencood.models.sub_modules.dual_space_box_coder import (
 )
 from opencood.models.sub_modules.dual_space_config import (
     dual_space_feature_flags,
+    resolve_dual_space_diagnostics,
+    resolve_v5_quality_safe_config,
+    resolve_v6_residual_safe_config,
     validate_dual_space_config,
+)
+from opencood.models.sub_modules.dual_space_diagnostics import (
+    get_dual_space_training_diagnostics,
+)
+from opencood.models.sub_modules.dual_space_extensions import (
+    apply_residual_norm_cap,
 )
 from opencood.models.sub_modules.dual_space_object_roi import (
     ChunkedRotatedBEVROISampler,
@@ -267,6 +276,18 @@ def install_dual_space_modules(model, args):
 
     model.dual_space_config = config
     model.dual_space_flags = dual_space_feature_flags(config)
+    if model.dual_space_flags["diagnostics"]:
+        model.dual_space_diagnostics_config = resolve_dual_space_diagnostics(
+            config
+        )
+    if model.dual_space_flags["v5_quality_safe"]:
+        model.dual_space_v5_quality_safe_config = (
+            resolve_v5_quality_safe_config(config)
+        )
+    if model.dual_space_flags["v6_residual_safe"]:
+        model.dual_space_v6_residual_safe_config = (
+            resolve_v6_residual_safe_config(config)
+        )
     model._dual_space_checkpoint_ready = bool(
         config["mode"] == "stage1_anchor"
         and config["allow_untrained_initialization"]
@@ -692,6 +713,20 @@ def run_dual_space_training(model, context, data_dict, detector_output=None):
         if len(predicted_proposals) != len(context["scenes"]):
             raise ValueError("decoded detector batch does not match context scenes")
 
+    diagnostics = (
+        get_dual_space_training_diagnostics(model) if model.training else None
+    )
+    if diagnostics is not None:
+        diagnostics.begin_forward()
+    v5_config = getattr(model, "dual_space_v5_quality_safe_config", None)
+    need_matching_metadata = bool(
+        (diagnostics is not None and diagnostics.quality_target_enabled)
+        or (
+            v5_config is not None
+            and v5_config["valid_target_mask"]["enabled"]
+            and v5_config["valid_target_mask"]["require_matched"]
+        )
+    )
     scene_outputs = []
     total_pairs = 0
     valid_pairs = 0
@@ -699,20 +734,42 @@ def run_dual_space_training(model, context, data_dict, detector_output=None):
     proposal_count = 0
     for scene_index, scene in enumerate(context["scenes"]):
         if model.dual_space_flags["mixed_proposals"]:
-            proposals, targets = model.dual_space_training_proposal_sampler(
-                gt_boxes[scene_index],
-                gt_mask[scene_index],
-                with_jitter=bool(model.training),
-                predicted_boxes=predicted_proposals[scene_index],
-                predicted_scores=predicted_scores[scene_index],
-            )
+            if need_matching_metadata:
+                proposals, targets, matching = (
+                    model.dual_space_training_proposal_sampler(
+                        gt_boxes[scene_index],
+                        gt_mask[scene_index],
+                        with_jitter=bool(model.training),
+                        predicted_boxes=predicted_proposals[scene_index],
+                        predicted_scores=predicted_scores[scene_index],
+                        return_metadata=True,
+                    )
+                )
+            else:
+                proposals, targets = model.dual_space_training_proposal_sampler(
+                    gt_boxes[scene_index],
+                    gt_mask[scene_index],
+                    with_jitter=bool(model.training),
+                    predicted_boxes=predicted_proposals[scene_index],
+                    predicted_scores=predicted_scores[scene_index],
+                )
         else:
             # Keep the original DS-V1 call signature and RNG path unchanged.
-            proposals, targets = model.dual_space_training_proposal_sampler(
-                gt_boxes[scene_index],
-                gt_mask[scene_index],
-                with_jitter=bool(model.training),
-            )
+            if need_matching_metadata:
+                proposals, targets, matching = (
+                    model.dual_space_training_proposal_sampler(
+                        gt_boxes[scene_index],
+                        gt_mask[scene_index],
+                        with_jitter=bool(model.training),
+                        return_metadata=True,
+                    )
+                )
+            else:
+                proposals, targets = model.dual_space_training_proposal_sampler(
+                    gt_boxes[scene_index],
+                    gt_mask[scene_index],
+                    with_jitter=bool(model.training),
+                )
         result = predict_scene_residuals(model, scene, proposals)
         target_residuals = encode_box_residual(
             proposals, targets, yaw_mode=yaw_mode
@@ -727,6 +784,11 @@ def run_dual_space_training(model, context, data_dict, detector_output=None):
                 "individual_targets": individual_targets,
             }
         )
+        if need_matching_metadata:
+            result["proposal_matched_gt_indices"] = matching[
+                "matched_gt_indices"
+            ]
+            result["proposal_matched_valid"] = matching["matched_valid"]
         if model.dual_space_flags["quality"]:
             if pair_indices.numel():
                 selected_proposals = proposals.index_select(0, pair_indices[:, 0])
@@ -742,6 +804,34 @@ def run_dual_space_training(model, context, data_dict, detector_output=None):
             else:
                 quality_targets = proposals.new_empty((0,))
             result["quality_targets"] = quality_targets.detach()
+            if v5_config is not None:
+                result["quality_pair_indices"] = pair_indices
+                result["quality_matched_valid"] = (
+                    matching["matched_valid"].index_select(
+                        0, pair_indices[:, 0]
+                    )
+                    if pair_indices.numel()
+                    else matching["matched_valid"].new_empty((0,))
+                ) if need_matching_metadata else torch.ones_like(
+                    quality_targets, dtype=torch.bool
+                )
+            if diagnostics is not None and diagnostics.quality_target_enabled:
+                raw_iou = aligned_rotated_bev_iou_hwl(
+                    proposals.detach(), targets.detach()
+                ) if proposals.shape[0] else proposals.new_empty((0,))
+                diagnostics.record_quality_scene(
+                    diagnostics.next_sample_index(),
+                    scene_index,
+                    proposals,
+                    targets,
+                    matching["matched_gt_indices"],
+                    matching["matched_valid"],
+                    raw_iou,
+                    pair_indices,
+                    quality_targets,
+                    result["individual_quality"],
+                    scene["agent_modalities"],
+                )
         scene_outputs.append(result)
         proposal_count += int(proposals.shape[0])
         total_pairs += int(result["valid_mask"].numel())
@@ -765,6 +855,12 @@ def run_dual_space_training(model, context, data_dict, detector_output=None):
     }
     if model.dual_space_flags["quality"]:
         payload["quality_enabled"] = True
+    if v5_config is not None:
+        payload["v5_quality_safe"] = v5_config
+    if diagnostics is not None:
+        if diagnostics.gradient_flow_enabled:
+            payload["gradient_diagnostics_enabled"] = True
+        diagnostics.end_forward()
     return payload
 
 
@@ -886,7 +982,13 @@ def predict_scene_residuals(model, scene, proposals):
                 (proposal_count, agent_count)
             )
 
-    if model.dual_space_config["consensus"]["mode"] == "quality_weighted":
+    bypass_quality = _inference_ablation_enabled(
+        model, "bypass_quality_weighting"
+    )
+    if (
+        model.dual_space_config["consensus"]["mode"] == "quality_weighted"
+        and not bypass_quality
+    ):
         quality_config = model.dual_space_config["quality"]
         fused_residuals, any_valid, consensus_weights, quality_fallback = (
             quality_weighted_geometry_consensus(
@@ -903,7 +1005,14 @@ def predict_scene_residuals(model, scene, proposals):
         fused_residuals, any_valid = uniform_geometry_consensus(
             per_agent_residuals, valid_mask
         )
-        consensus_weights = quality_fallback = None
+        if bypass_quality and model.dual_space_flags["quality"]:
+            valid_weights = valid_mask.to(dtype=per_agent_residuals.dtype)
+            consensus_weights = valid_weights / valid_weights.sum(
+                dim=1, keepdim=True
+            ).clamp_min(1.0)
+            quality_fallback = any_valid.clone()
+        else:
+            consensus_weights = quality_fallback = None
     decoded = decode_box_residual(
         proposals, fused_residuals, yaw_mode=yaw_mode
     )
@@ -935,6 +1044,8 @@ def predict_scene_residuals(model, scene, proposals):
                 "quality_fallback": quality_fallback,
             }
         )
+        if bypass_quality:
+            result["quality_weighting_bypassed"] = True
     return result
 
 
@@ -958,12 +1069,75 @@ def route_modality_adapters(
             raise KeyError("no dual-space object adapter for modality %s" % modality)
         positions = torch.tensor(indices, dtype=torch.long, device=roi_features.device)
         selected = roi_features.index_select(0, positions)
-        output_parts.append(getattr(model, attribute)(selected))
+        adapter = getattr(model, attribute)
+        branch = "context" if adapter_namespace == "context_adapter" else "object"
+        bypass = _inference_ablation_enabled(
+            model, "bypass_%s_adapter" % branch
+        )
+        v6_config = getattr(model, "dual_space_v6_residual_safe_config", None)
+        branch_config = v6_config.get(branch) if v6_config is not None else None
+        v6_enabled = bool(branch_config and branch_config["enabled"])
+        diagnostics = (
+            get_dual_space_training_diagnostics(model)
+            if model.training else None
+        )
+        observe_adapter = bool(
+            diagnostics is not None and diagnostics.adapter_residual_enabled
+        )
+        if not (bypass or v6_enabled or observe_adapter):
+            # This is the legacy V3 path, including its exact module call.
+            adapted = adapter(selected)
+        elif isinstance(adapter, nn.Identity):
+            adapted = selected
+        elif isinstance(adapter, ResidualObjectAdapter):
+            raw_residual = adapter.delta(selected)
+            safe_residual = raw_residual
+            v6_stats = None
+            if v6_enabled:
+                safe_residual, v6_stats = apply_residual_norm_cap(
+                    selected,
+                    raw_residual,
+                    branch_config,
+                    feature_dim=1,
+                )
+            adapted = selected if bypass else selected + safe_residual
+            if observe_adapter:
+                diagnostics.record_adapter(
+                    modality,
+                    branch,
+                    selected,
+                    raw_residual,
+                    adapted,
+                    feature_dim=1,
+                    v6_stats=v6_stats,
+                )
+        else:
+            if bypass:
+                adapted = selected
+            else:
+                raise TypeError(
+                    "V6/adapter diagnostics require ResidualObjectAdapter for %s"
+                    % attribute
+                )
+        output_parts.append(adapted)
         position_parts.append(positions)
     packed_outputs = torch.cat(output_parts, dim=0)
     packed_positions = torch.cat(position_parts, dim=0)
     inverse_order = torch.argsort(packed_positions)
     return packed_outputs.index_select(0, inverse_order)
+
+
+def _inference_ablation_enabled(model, key):
+    """Return one child bypass only under both diagnostic parent gates."""
+    if not getattr(model, "dual_space_enabled", False):
+        return False
+    if model.dual_space_config["mode"] != "inference":
+        return False
+    config = getattr(model, "dual_space_diagnostics_config", None)
+    if not isinstance(config, dict) or not config["enabled"]:
+        return False
+    ablation = config["inference_ablation"]
+    return bool(ablation["enabled"] and ablation[key])
 
 
 def proposal_geometry_raw(proposals, geometry):

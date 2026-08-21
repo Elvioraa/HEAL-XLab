@@ -1,5 +1,6 @@
 """Shared CPU fixtures for Full Dual-Space synthetic smoke tests."""
 
+import copy
 from collections import OrderedDict
 
 import torch
@@ -24,6 +25,9 @@ def make_dual_config(
     context_roi_size=3,
     quality_use_coverage=True,
     quality_use_distance=True,
+    diagnostics=None,
+    v5_quality_safe=None,
+    v6_residual_safe=None,
 ):
     """Return one complete explicit synthetic Dual-Space configuration."""
     if rescue:
@@ -123,6 +127,12 @@ def make_dual_config(
         )
     if active_modality is not None:
         config["active_modality"] = active_modality
+    if diagnostics is not None:
+        config["diagnostics"] = copy.deepcopy(diagnostics)
+    if v5_quality_safe is not None:
+        config["v5_quality_safe"] = copy.deepcopy(v5_quality_safe)
+    if v6_residual_safe is not None:
+        config["v6_residual_safe"] = copy.deepcopy(v6_residual_safe)
     return config
 
 
@@ -146,6 +156,9 @@ class TinyDualSpaceHost(nn.Module):
         quality_use_distance=True,
         detail_channels=4,
         context_channels=6,
+        diagnostics=None,
+        v5_quality_safe=None,
+        v6_residual_safe=None,
     ):
         super().__init__()
         self.modality_name_list = list(modalities)
@@ -174,6 +187,9 @@ class TinyDualSpaceHost(nn.Module):
                 context_roi_size=context_roi_size,
                 quality_use_coverage=quality_use_coverage,
                 quality_use_distance=quality_use_distance,
+                diagnostics=diagnostics,
+                v5_quality_safe=v5_quality_safe,
+                v6_residual_safe=v6_residual_safe,
             ),
         }
         for name in modalities:
